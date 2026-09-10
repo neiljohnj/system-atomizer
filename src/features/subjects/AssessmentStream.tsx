@@ -9,6 +9,7 @@ import {
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { atomApi } from "../../api";
+import { DuplicateActivityDialog } from "../faculty/DuplicateActivityDialog";
 import { formatDateTime } from "../../format";
 import type {
   ActivityScope, ActivitySummary, AssessmentStreamResponse, AssessmentTopic,
@@ -29,6 +30,8 @@ export function AssessmentStream({ offering, scope, role, stream, loading, onCha
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const [manageTopics, setManageTopics] = useState(false);
+  const [duplicateTarget, setDuplicateTarget] = useState<ActivitySummary | null>(null);
+  const [publicationError, setPublicationError] = useState("");
   const [confirmAction, setConfirmAction] = useState<{ activity: ActivitySummary; action: "publish" | "unpublish" } | null>(null);
   const search = searchParams.get("q") ?? "";
   const deferredSearch = useDeferredValue(search.trim().toLocaleLowerCase());
@@ -78,9 +81,7 @@ export function AssessmentStream({ offering, scope, role, stream, loading, onCha
   const performActivityAction = async (activity: ActivitySummary, action: string, topicId?: string | null) => {
     try {
       if (action === "duplicate") {
-        const duplicated = await atomApi.duplicateActivity(activity.id);
-        await onChanged();
-        navigate(`/subjects/${offering.id}/activities/${duplicated.id}?${searchParams}`);
+        setDuplicateTarget(activity);
       } else if (action === "topic") {
         await atomApi.organizeActivity(activity.id, topicId ?? null, scope);
         await onChanged();
@@ -98,16 +99,18 @@ export function AssessmentStream({ offering, scope, role, stream, loading, onCha
 
   const changePublication = async () => {
     if (!confirmAction) return;
+    setPublicationError("");
     try {
       const { activity, action } = confirmAction;
       if (action === "publish") await atomApi.publishActivity(activity.id, scope, activity.draftRevision ?? 1);
       else await atomApi.unpublishActivity(activity.id, scope);
       setConfirmAction(null);
       await onChanged();
-    } catch (error) { onError(error instanceof Error ? error.message : "Publication could not be changed"); }
+    } catch (error) { setPublicationError(error instanceof Error ? error.message : "Publication could not be changed"); }
   };
 
   return <section className="assessment-stream">
+    {duplicateTarget ? <DuplicateActivityDialog activity={duplicateTarget} offering={offering} onClose={() => setDuplicateTarget(null)} onCreated={async created => { await onChanged(); navigate(`/subjects/${offering.id}/activities/${created.id}?group=all&period=${created.gradingPeriod}`); }} /> : null}
     <header className="stream-heading">
       <div><p>{scope.gradingPeriod === "midterm" ? "Midterm" : "Final Term"}</p><h1>Activities</h1><span>{scope.teachingGroupId === "all" ? (role === "faculty" ? "All assigned groups" : "All my groups") : offering.groups.find((group) => group.id === scope.teachingGroupId)?.label}</span></div>
       {role === "faculty" ? <div className="stream-heading__actions"><button className="button" onClick={() => setManageTopics(true)}><Settings2 size={16} />Manage topics</button><Link className="button button--primary" to={`/subjects/${offering.id}/activities/new?${searchParams}`}><Plus size={17} />New activity</Link></div> : null}
@@ -132,14 +135,14 @@ export function AssessmentStream({ offering, scope, role, stream, loading, onCha
           {!isCollapsed ? <div className="topic-items">{section.items.map((activity, itemIndex) => <ActivityStreamCard
             key={activity.id} activity={activity} role={role} offeringId={offering.id} query={searchParams.toString()} topics={stream.topics}
             first={itemIndex === 0} last={itemIndex === section.items.length - 1} onRemember={rememberReturn}
-            onAction={(action, topicId) => action === "publish" || action === "unpublish" ? setConfirmAction({ activity, action }) : void performActivityAction(activity, action, topicId)}
+            onAction={(action, topicId) => action === "publish" || action === "unpublish" ? (setPublicationError(""), setConfirmAction({ activity, action })) : void performActivityAction(activity, action, topicId)}
           />)}</div> : null}
         </section>;
       })}
     </div> : <div className="stream-empty"><FileText size={34} /><h2>No matching activities</h2><p>{search || status !== "all" || topicFilter ? "Clear a filter to see other activities in this grading period." : role === "faculty" ? "Create an activity or select another teaching group or grading period." : "Your instructor has not published an activity for this view."}</p></div>}
 
     {role === "faculty" ? <TopicManager open={manageTopics} onOpenChange={setManageTopics} offering={offering} scope={scope} topics={stream.topics} onChanged={onChanged} onError={onError} /> : null}
-    <ConfirmDialog open={Boolean(confirmAction)} title={confirmAction?.action === "publish" ? "Publish this activity?" : "Unpublish this activity?"} description={confirmAction?.action === "publish" ? "Students in its selected teaching groups will receive a new immutable release." : "The activity will disappear from student workspaces until it is published again."} actionLabel={confirmAction?.action === "publish" ? "Publish" : "Unpublish"} onOpenChange={(open) => { if (!open) setConfirmAction(null); }} onConfirm={() => void changePublication()} />
+    <ConfirmDialog error={publicationError} destinations={confirmAction ? `${confirmAction.activity.gradingPeriod === "midterm" ? "Midterm" : "Final Term"}: ${(confirmAction.action === "publish" ? confirmAction.activity.targetGroups : confirmAction.activity.publishedScope).map(group => group.label).join(" · ")}` : ""} open={Boolean(confirmAction)} title={confirmAction?.action === "publish" ? "Publish this activity?" : "Unpublish this activity?"} description={confirmAction?.action === "publish" ? "Students in its selected teaching groups will receive a new immutable release." : "The activity will disappear from student workspaces until it is published again."} actionLabel={confirmAction?.action === "publish" ? "Publish" : "Unpublish"} onOpenChange={(open) => { if (!open) setConfirmAction(null); }} onConfirm={() => void changePublication()} />
   </section>;
 }
 
@@ -154,7 +157,7 @@ function ActivityStreamCard({ activity, role, offeringId, query, topics, first, 
       <div className="stream-card__body"><div className="stream-card__title"><h2>{activity.title}</h2><div className="stream-badges"><Status state={activity.status} /><span className={`schedule-state schedule-state--${activity.scheduleState}`}>{scheduleLabel(activity.scheduleState)}</span></div></div>{activity.overviewExcerpt ? <p>{activity.overviewExcerpt}</p> : null}<div className="stream-meta"><span>Opens {formatDateTime(activity.opensAt)}</span><span>Due {formatDateTime(activity.deadlineAt)}</span><span>{(activity.status === "published" ? activity.publishedScope : activity.targetGroups).map((group) => group.label).join(" · ")}</span>{role === "faculty" ? <strong>{activity.submissionCount} of {activity.studentCount} submissions</strong> : <strong>{studentStateLabel(activity)}</strong>}</div></div>
       <ChevronRight className="stream-card__arrow" size={19} />
     </Link>
-    {role === "faculty" ? <DropdownMenu.Root><DropdownMenu.Trigger asChild><button className="icon-button stream-card__menu" aria-label={`Actions for ${activity.title}`}><MoreHorizontal size={18} /></button></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="end"><DropdownMenu.Item className="menu-item" asChild><Link to={`/subjects/${offeringId}/activities/${activity.id}/edit?${query}`}><Edit3 size={14} />Edit</Link></DropdownMenu.Item><DropdownMenu.Item className="menu-item" onSelect={() => onAction("duplicate")}><Copy size={14} />Duplicate</DropdownMenu.Item><DropdownMenu.Sub><DropdownMenu.SubTrigger className="menu-item">Move to topic<ChevronRight size={14} /></DropdownMenu.SubTrigger><DropdownMenu.Portal><DropdownMenu.SubContent className="menu-content"><DropdownMenu.Item className="menu-item" onSelect={() => onAction("topic", null)}>No topic</DropdownMenu.Item>{topics.map((topic) => <DropdownMenu.Item className="menu-item" key={topic.id} onSelect={() => onAction("topic", topic.id)}>{topic.title}</DropdownMenu.Item>)}</DropdownMenu.SubContent></DropdownMenu.Portal></DropdownMenu.Sub><DropdownMenu.Separator className="menu-separator" /><DropdownMenu.Item className="menu-item" disabled={first} onSelect={() => onAction("up")}><ArrowUp size={14} />Move up</DropdownMenu.Item><DropdownMenu.Item className="menu-item" disabled={last} onSelect={() => onAction("down")}><ArrowDown size={14} />Move down</DropdownMenu.Item><DropdownMenu.Item className="menu-item" onSelect={() => onAction("automatic")}><RotateCcw size={14} />Use automatic order</DropdownMenu.Item><DropdownMenu.Separator className="menu-separator" /><DropdownMenu.Item className="menu-item" onSelect={() => onAction(activity.status === "draft" ? "publish" : "unpublish")}>{activity.status === "draft" ? <Send size={14} /> : <X size={14} />}{activity.status === "draft" ? "Publish" : "Unpublish"}</DropdownMenu.Item></DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root> : null}
+    {role === "faculty" && !activity.evidenceOnly ? <DropdownMenu.Root><DropdownMenu.Trigger asChild><button className="icon-button stream-card__menu" aria-label={`Actions for ${activity.title}`}><MoreHorizontal size={18} /></button></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="end"><DropdownMenu.Item className="menu-item" asChild><Link to={`/subjects/${offeringId}/activities/${activity.id}/edit?${query}`}><Edit3 size={14} />Edit</Link></DropdownMenu.Item><DropdownMenu.Item className="menu-item" onSelect={() => onAction("duplicate")}><Copy size={14} />Duplicate</DropdownMenu.Item><DropdownMenu.Sub><DropdownMenu.SubTrigger className="menu-item">Move to topic<ChevronRight size={14} /></DropdownMenu.SubTrigger><DropdownMenu.Portal><DropdownMenu.SubContent className="menu-content"><DropdownMenu.Item className="menu-item" onSelect={() => onAction("topic", null)}>No topic</DropdownMenu.Item>{topics.map((topic) => <DropdownMenu.Item className="menu-item" key={topic.id} onSelect={() => onAction("topic", topic.id)}>{topic.title}</DropdownMenu.Item>)}</DropdownMenu.SubContent></DropdownMenu.Portal></DropdownMenu.Sub><DropdownMenu.Separator className="menu-separator" /><DropdownMenu.Item className="menu-item" disabled={first} onSelect={() => onAction("up")}><ArrowUp size={14} />Move up</DropdownMenu.Item><DropdownMenu.Item className="menu-item" disabled={last} onSelect={() => onAction("down")}><ArrowDown size={14} />Move down</DropdownMenu.Item><DropdownMenu.Item className="menu-item" onSelect={() => onAction("automatic")}><RotateCcw size={14} />Use automatic order</DropdownMenu.Item><DropdownMenu.Separator className="menu-separator" /><DropdownMenu.Item className="menu-item" onSelect={() => onAction(activity.status === "draft" ? "publish" : "unpublish")}>{activity.status === "draft" ? <Send size={14} /> : <X size={14} />}{activity.status === "draft" ? "Publish" : "Unpublish"}</DropdownMenu.Item></DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root> : null}
   </article>;
 }
 
@@ -164,8 +167,8 @@ function TopicManager({ open, onOpenChange, offering, scope, topics, onChanged, 
   return <Dialog.Root open={open} onOpenChange={onOpenChange}><Dialog.Portal><Dialog.Overlay className="modal-backdrop" /><Dialog.Content className="modal topic-manager"><header className="modal__header"><div><Dialog.Title>Manage topics</Dialog.Title><Dialog.Description>{offering.code} · {scope.gradingPeriod === "midterm" ? "Midterm" : "Final Term"}</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close topic manager"><X size={19} /></button></Dialog.Close></header><form className="topic-create" onSubmit={(event) => { event.preventDefault(); const title = newTitle.trim(); if (!title) return; void perform(() => atomApi.createTopic(offering.id, scope.gradingPeriod, title)).then(() => setNewTitle("")); }}><label><span>New topic</span><input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} maxLength={120} placeholder="Topic name" /></label><button className="button button--primary" disabled={!newTitle.trim()}><Plus size={15} />Add topic</button></form><div className="topic-manager__list">{topics.length ? topics.map((topic, index) => <div className="topic-manager__row" key={topic.id}><span className="topic-position">{String(index + 1).padStart(2, "0")}</span><input aria-label={`Rename ${topic.title}`} defaultValue={topic.title} onBlur={(event) => { const title = event.target.value.trim(); if (title && title !== topic.title) void perform(() => atomApi.renameTopic(topic.id, title)); }} /><div className="topic-row-actions"><button className="icon-button" disabled={index === 0} onClick={() => void perform(() => atomApi.moveAssessmentStreamItem(scope, "topic", topic.id, Math.max(0, index - 1)))} aria-label={`Move ${topic.title} up`}><ArrowUp size={15} /></button><button className="icon-button" disabled={index === topics.length - 1} onClick={() => void perform(() => atomApi.moveAssessmentStreamItem(scope, "topic", topic.id, index + 1))} aria-label={`Move ${topic.title} down`}><ArrowDown size={15} /></button><button className="icon-button" onClick={() => void perform(() => atomApi.resetAssessmentStreamOrder(scope, "topic", topic.id))} aria-label={`Use automatic order for ${topic.title}`}><RotateCcw size={15} /></button><button className="icon-button icon-button--danger" onClick={() => { if (window.confirm(`Delete “${topic.title}”? Its activities will move to No topic.`)) void perform(() => atomApi.deleteTopic(topic.id)); }} aria-label={`Delete ${topic.title}`}><Trash2 size={15} /></button></div></div>) : <p className="topic-manager__empty">No topics have been created for this grading period.</p>}</div><footer className="topic-manager__footer"><button className="text-button" onClick={() => void perform(() => atomApi.resetAssessmentStreamOrder(scope, "all"))}><RotateCcw size={14} />Reset all ordering</button><Dialog.Close asChild><button className="button">Done</button></Dialog.Close></footer></Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
 
-function ConfirmDialog({ open, title, description, actionLabel, onOpenChange, onConfirm }: { open: boolean; title: string; description: string; actionLabel: string; onOpenChange: (open: boolean) => void; onConfirm: () => void }) {
-  return <Dialog.Root open={open} onOpenChange={onOpenChange}><Dialog.Portal><Dialog.Overlay className="modal-backdrop" /><Dialog.Content className="modal modal--compact"><header className="modal__header"><div><Dialog.Title>{title}</Dialog.Title><Dialog.Description>{description}</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></header><footer className="confirm-actions"><Dialog.Close asChild><button className="button">Cancel</button></Dialog.Close><button className="button button--primary" onClick={onConfirm}>{actionLabel}</button></footer></Dialog.Content></Dialog.Portal></Dialog.Root>;
+function ConfirmDialog({ open, title, description, actionLabel, onOpenChange, onConfirm, destinations, error }: { destinations: string; error: string; open: boolean; title: string; description: string; actionLabel: string; onOpenChange: (open: boolean) => void; onConfirm: () => void }) {
+  return <Dialog.Root open={open} onOpenChange={onOpenChange}><Dialog.Portal><Dialog.Overlay className="modal-backdrop" /><Dialog.Content className="modal modal--compact"><header className="modal__header"><div><Dialog.Title>{title}</Dialog.Title><Dialog.Description>{description}</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></header><p>{destinations}</p>{error ? <p role="alert" className="publish-warning">{error}</p> : null}<footer className="confirm-actions"><Dialog.Close asChild><button className="button">Cancel</button></Dialog.Close><button className="button button--primary" onClick={onConfirm}>{actionLabel}</button></footer></Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
 
 function Status({ state }: { state: "draft" | "published" }) { return <span className={`status status--${state}`}>{state === "published" ? "Published" : "Draft"}</span>; }

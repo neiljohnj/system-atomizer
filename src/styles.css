@@ -354,6 +354,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
 .form-note { margin: 0; padding: 10px 12px; background: var(--gray-50); color: var(--gray-500); font-size: 11px; line-height: 1.45; }
 .modal__actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px; }
+.duplicate-dialog__body { padding: 18px 24px 24px; display: grid; gap: 16px; }
+.duplicate-dialog__body fieldset { border: 0; padding: 0; margin: 0; }
+.duplicate-destination { display: flex; align-items: center; gap: 10px; padding: 9px 0; font-size: 13px; }
+.duplicate-dialog__body .publish-warning { margin: 0; }
 
 .toast { position: fixed; z-index: 200; top: 76px; right: 18px; max-width: 420px; padding: 12px 14px; display: flex; align-items: flex-start; gap: 14px; border: 1px solid #f3a4aa; background: var(--red-50); color: var(--red-700); border-radius: 7px; box-shadow: 0 12px 30px rgb(16 24 40 / 14%); font-size: 12px; line-height: 1.45; }
 .toast button { margin-left: auto; border: 0; background: transparent; color: inherit; font-size: 18px; cursor: pointer; }

@@ -36,6 +36,14 @@ describe("local account lifecycle", () => {
       expect(auth.session(request({ cookie })).currentUser.id).toBe("user-faculty-demo");
       auth.logout(request({ cookie }), loginResponse);
       expect(() => auth.session(request({ cookie }))).toThrow("no longer active");
+      await auth.login(request(), loginResponse, { identifier: "neil.faculty", password: "faculty-password" });
+      const beforeRecovery = headers.get("set-cookie")?.split(";")[0] ?? "";
+      expect(() => auth.resetFaculty(request({ remoteAddress: "192.0.2.1" }), "user-faculty-demo")).toThrow();
+      const recovered = auth.resetFaculty(setupRequest, "user-faculty-demo");
+      expect(() => auth.session(request({ cookie: beforeRecovery }))).toThrow("no longer active");
+      const recoveredSession = await auth.login(request(), loginResponse, { identifier: "neil.faculty", password: recovered.temporaryPassword });
+      expect(recoveredSession.mustChangePassword).toBe(true);
+      expect(database.db.prepare("SELECT COUNT(*) AS count FROM auth_audit_events WHERE event_type='faculty_recovered_locally'").get()?.count).toBe(1);
     } finally {
       database.db.close();
     }

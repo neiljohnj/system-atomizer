@@ -1,8 +1,8 @@
-import { resolve } from "node:path";
+import { storageRoot as resolveStorageRoot } from "./storage-root.js";
 import { openAtomDatabase } from "./db.js";
 import { seedDemoAccounts } from "./demo-accounts.js";
 
-const storageRoot = process.env.ATOM_ROOT ? resolve(process.env.ATOM_ROOT) : process.cwd();
+const storageRoot = resolveStorageRoot();
 const database = openAtomDatabase(storageRoot);
 
 try {

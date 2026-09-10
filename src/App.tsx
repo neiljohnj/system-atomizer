@@ -17,6 +17,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [unsyncedDraft, setUnsyncedDraft] = useState(false);
+  const [deviceSaved, setDeviceSaved] = useState(false);
   const [loggedOutDestination, setLoggedOutDestination] = useState("/login");
 
   const loadBootstrap = useCallback(async () => {
@@ -44,9 +45,14 @@ export default function App() {
       setSession((current) => ({ authenticated: false, setupRequired: false, httpWarning: current?.httpWarning ?? true }));
       setBootstrap(null);
       const returnTo = `${window.location.pathname}${window.location.search}`;
-      navigate(`/login?returnTo=${encodeURIComponent(returnTo)}`, { replace: true });
+      const destination = `/login?returnTo=${encodeURIComponent(returnTo)}`;
+      setLoggedOutDestination(destination);
+      navigate(destination, { replace: true });
     };
-    const draftSync = (event: Event) => setUnsyncedDraft(Boolean((event as CustomEvent<{ unsynced: boolean }>).detail?.unsynced));
+    const draftSync = (event: Event) => {
+      const detail = (event as CustomEvent<{ unsynced: boolean; deviceSaved?: boolean }>).detail;
+      setUnsyncedDraft(Boolean(detail?.unsynced)); setDeviceSaved(Boolean(detail?.deviceSaved));
+    };
     window.addEventListener("atom:session-expired", expired);
     window.addEventListener("atom:draft-sync", draftSync);
     return () => {
@@ -66,7 +72,9 @@ export default function App() {
   };
 
   const signOut = async (switching = false) => {
-    if (unsyncedDraft && !window.confirm("This draft is saved only on this device. Sign out and keep the recovery copy?")) return;
+    if (unsyncedDraft && !window.confirm(deviceSaved
+      ? "The latest draft is saved on this device but not to ATOM. Sign out?"
+      : "The latest changes are not confirmed saved. Signing out may lose them. Sign out?")) return;
     const returnTo = switching ? `${location.pathname}${location.search}` : undefined;
     try { await atomApi.logout(); } catch { /* The local UI still clears an expired session. */ }
     const destination = switching
@@ -124,8 +132,8 @@ export default function App() {
         <Routes>
           <Route path="/change-password" element={<ChangePasswordPage forced={false} onChanged={(value) => void authenticated({ ...session, ...value, authenticated: true })} onSignOut={() => void signOut()} />} />
           <Route path="/subjects" element={<SubjectHome academicTerms={bootstrap.academicTerms} role={bootstrap.currentUser.role} />} />
-          <Route path="/subjects/:offeringId/activities/new" element={bootstrap.currentUser.role === "faculty" ? <ActivityAuthoring bootstrap={bootstrap} onError={setError} /> : <Navigate to="/subjects" replace />} />
-          <Route path="/subjects/:offeringId/activities/:activityId/edit" element={bootstrap.currentUser.role === "faculty" ? <ActivityAuthoring bootstrap={bootstrap} onError={setError} /> : <Navigate to="/subjects" replace />} />
+          <Route path="/subjects/:offeringId/activities/new" element={bootstrap.currentUser.role === "faculty" ? <ActivityAuthoring key={`${bootstrap.currentUser.id}:${location.pathname}:${location.search}`} bootstrap={bootstrap} onError={setError} /> : <Navigate to="/subjects" replace />} />
+          <Route path="/subjects/:offeringId/activities/:activityId/edit" element={bootstrap.currentUser.role === "faculty" ? <ActivityAuthoring key={`${bootstrap.currentUser.id}:${location.pathname}:${location.search}`} bootstrap={bootstrap} onError={setError} /> : <Navigate to="/subjects" replace />} />
           <Route path="/subjects/:offeringId/activities" element={<SubjectWorkspace bootstrap={bootstrap} module="activities" onError={setError} />} />
           <Route path="/subjects/:offeringId/activities/:activityId" element={<SubjectWorkspace bootstrap={bootstrap} module="activities" onError={setError} />} />
           <Route path="/subjects/:offeringId/quizzes" element={<SubjectWorkspace bootstrap={bootstrap} module="quizzes" onError={setError} />} />

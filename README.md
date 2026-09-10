@@ -12,14 +12,14 @@ ATOM is a LAN-first academic workspace. The current runnable slice proves a subj
 - Activities may be simple or progressive. Progressive activities contain ordered, independently editable parts with sequential or independent submission claims.
 - Structured submission manifests support exact or templated filenames, individual/ZIP delivery, and descriptive, warning, or strict preflight validation without executing student code.
 - Optional overall or per-part rubrics are included in immutable releases; point mismatches require explicit publication acknowledgement.
-- Drafts save to IndexedDB immediately and synchronize to ATOM after two idle seconds, with explicit conflict recovery instead of silent overwrites.
+- Drafts attempt device recovery and synchronize to ATOM after two idle seconds. The editor distinguishes completed device writes, tab-only recovery, server saves, and revision conflicts.
 - Local faculty usernames and student-number accounts use hashed passwords, expiring server sessions, forced first-login password changes, and audited recovery/reset actions.
 - The account menu provides Change password, Switch account, and Sign out without putting identity selection in the normal header.
 - Students see a published activity once even when it applies through more than one of their group placements.
 - Students submit one `.py` source file or `.zip` project at a time to protected local storage.
 - An upload becomes the current submission only after it is completely received, hashed, moved, and recorded in SQLite.
-- Repeating an interrupted request with the same idempotency key does not create a duplicate submission.
-- Faculty can download current submissions and record a total score, manual deduction, comment, and annotations.
+- Eligible identical retries with the same idempotency key return existing evidence; changed payloads return a conflict.
+- Assigned faculty can download scoped submissions and record provisional totals, deductions, comments, and annotations. These are not authoritative grades; criterion policy and immutable correction history remain deferred.
 - Quiz and exam routes clearly state that their authoring and delivery engines are not enabled in this MVP.
 
 ## Run it
@@ -28,10 +28,11 @@ Requirements: Node.js 22 or newer. No PostgreSQL, Docker, Rust, or Tauri install
 
 ```powershell
 npm.cmd install
-npm.cmd run dev:build
+npm.cmd run build
+npm.cmd start
 ```
 
-Open [http://127.0.0.1:4174](http://127.0.0.1:4174). `npm.cmd run dev:build` builds once and then serves the frontend and API from this one address. Later launches use `npm.cmd run dev` without rebuilding. Neither command keeps a second Vite server or frontend watcher running.
+Open [http://127.0.0.1:4174](http://127.0.0.1:4174). The server serves the built frontend and API from one address. Later launches use `npm.cmd start`; rebuild after source changes. Read the [operations and recovery procedure](docs/OPERATIONS.md) before shared use.
 
 For a production-style local build without the development identity switcher:
 
@@ -54,7 +55,7 @@ The development launch and maintenance command reset only Faculty Demo, Student 
 
 Until HTTPS is configured, ATOM displays a warning because LAN traffic and cookies are not encrypted. Set `ATOM_HTTPS=true` only when the site is genuinely served over HTTPS; doing so marks the session cookie `Secure`.
 
-The frontend and API normally share the same origin. If a future local reverse proxy strips standard browser fetch metadata, set `ATOM_ALLOWED_ORIGINS` to its exact comma-separated frontend origins; do not use wildcards.
+The frontend and API normally share the same origin. A supported proxy deployment requires backend `ATOM_BEHIND_PROXY=true`, `ATOM_HOST=127.0.0.1`, and the maintenance exclusions in the [operations procedure](docs/OPERATIONS.md). Never proxy direct mode. `ATOM_ALLOWED_ORIGINS`, when needed, accepts exact trusted origins; it does not secure maintenance routes.
 
 If the global npm cache is restricted, use the workspace-local cache:
 
@@ -81,10 +82,13 @@ To add the six guarded authoring stress-test drafts to the sample ITCC47 offerin
 
 ```powershell
 npm.cmd run build
-npm.cmd run stress:seed
+$env:ATOM_ROOT = 'C:\ATOM-disposable-fixture'
+npm.cmd run stress:seed -- --development-fixture
 ```
 
-The seed is idempotent and preserves existing fixtures. `npm.cmd run stress:seed -- --refresh` refreshes only untouched draft fixtures (revision 1 with no release or submissions); it refuses to overwrite edited or published work.
+Use an explicitly disposable root. The seed requires both `ATOM_ROOT` and `--development-fixture`. Add `--refresh` to refresh only untouched draft fixtures (revision 1 with no release or submissions); it refuses to overwrite edited or published work. Source and compiled seeds resolve shipped assets from their installation.
+
+Run `node server/test-fixtures/restore-drill.mjs` after building for a self-contained synthetic smoke and complete stopped-server restore verification.
 
 ## Local data and migrations
 
@@ -93,13 +97,14 @@ On first launch, ATOM creates:
 ```text
 data/
   atom.sqlite
+  activity-assets/
   uploads/
   tmp/
 ```
 
 `data/` is intentionally ignored by Git. SQLite schema changes are transactional and recorded in `schema_migrations`. The migrations preserve existing activity, release, submission, evaluation, and stored-file relationships while adding academic structure, hashed account credentials, revocable sessions, authentication audit events, versioned activity documents, protected assets, collaborators, and immutable release scopes.
 
-Set `ATOM_ROOT` to place the database and protected files somewhere else. Back up the database and `uploads` directory together while the server is stopped.
+Set `ATOM_ROOT` to the application storage root: the database is `<ATOM_ROOT>/data/atom.sqlite`. Relative roots resolve from the command's working directory. Back up the **entire stopped-server `data` tree**, including teaching assets and any remaining SQLite sidecars. Follow the [manifest and new-root restore checks](docs/OPERATIONS.md); database plus uploads alone is incomplete.
 
 The sample data contains Faculty Demo, Student Demo, Second Student, the ITCC47 offering, Lecture 2A, Laboratory 2A, Laboratory 2Ax, and one published Midterm laboratory activity assigned to both laboratory groups. The optional stress seed adds six clearly named drafts under the Midterm and Final Term **Authoring stress tests** topics.
 

@@ -23,8 +23,10 @@ import {
 import { applyManualPositions, overviewExcerpt, scheduleState } from "./assessment-stream.js";
 import { AuthService, type AuthUser, userFromRow } from "./auth.js";
 import { openAtomDatabase } from "./db.js";
+import { storageRoot as resolveStorageRoot } from "./storage-root.js";
 import { seedDemoAccounts } from "./demo-accounts.js";
 import { HttpError } from "./errors.js";
+import { InstructorAuthority } from "./instructor-authority.js";
 import { configuredAllowedOrigins, isAllowedMutationOrigin } from "./request-security.js";
 import {
   cleanOriginalFilename,
@@ -67,7 +69,7 @@ interface ActivityScope {
 }
 
 const applicationRoot = process.cwd();
-const storageRoot = process.env.ATOM_ROOT ? join(process.env.ATOM_ROOT) : applicationRoot;
+const storageRoot = resolveStorageRoot();
 const developmentPreviewEnabled = process.env.ATOM_DEVELOPMENT_PREVIEW === "true";
 const secureCookies = process.env.ATOM_HTTPS === "true";
 const allowedOrigins = configuredAllowedOrigins(process.env.ATOM_ALLOWED_ORIGINS);
@@ -80,7 +82,8 @@ const assetsDir = join(dataDir, "activity-assets");
 await mkdir(uploadsDir, { recursive: true });
 await mkdir(tempDir, { recursive: true });
 await mkdir(assetsDir, { recursive: true });
-const auth = new AuthService(db, { developmentPreviewEnabled, secureCookies });
+const auth = new AuthService(db, { developmentPreviewEnabled, secureCookies, behindProxy: process.env.ATOM_BEHIND_PROXY === "true" });
+const instructorAuthority = new InstructorAuthority(db);
 
 const upload = multer({
   dest: tempDir,
@@ -292,6 +295,7 @@ app.patch("/api/activities/:activityId/organization", (request, response) => {
   const activity = getActivityRow(routeParam(request, "activityId"));
   assertOfferingAccess(user, String(activity.subject_offering_id));
   assertActivityPermission(activity, user, "edit");
+  const scope = preflightActivityResponse(request, user, activity);
   const topicValue = (request.body as Record<string, unknown>).topicId;
   const topicId = topicValue === null || topicValue === undefined || topicValue === "" ? null : requiredText(topicValue, "Topic");
   if (topicId) {
@@ -304,7 +308,7 @@ app.patch("/api/activities/:activityId/organization", (request, response) => {
   db.prepare("UPDATE activities SET topic_id = ?, manual_position = NULL, updated_at = ? WHERE id = ?")
     .run(topicId, new Date().toISOString(), String(activity.id));
   auditOrganization(request, user, "activity_topic_changed", { activityId: String(activity.id), topicId });
-  response.json(getActivityDetail(String(activity.id), user, responseScope(request, user, activity)));
+  response.json(getActivityDetail(String(activity.id), user, scope));
 });
 
 app.post("/api/subject-offerings/:offeringId/assessment-order", (request, response) => {
@@ -327,7 +331,7 @@ app.post("/api/subject-offerings/:offeringId/assessment-order", (request, respon
     }
     assertActivityPermission(activity, user, "edit");
     const topicId = activity.topic_id ? String(activity.topic_id) : null;
-    moveActivity(activity, targetIndex, topicId);
+    moveActivity(activity, targetIndex, topicId, user);
   } else {
     throw new HttpError(400, "Ordering supports topics or activities");
   }
@@ -463,6 +467,7 @@ app.patch("/api/activities/:activityId", (request, response) => {
   const existing = getActivityRow(activityId);
   assertOfferingAccess(user, String(existing.subject_offering_id));
   assertActivityPermission(existing, user, "edit");
+  const scope = preflightActivityResponse(request, user, existing);
   if (String(existing.status) !== "draft") {
     throw new HttpError(409, "Unpublish the activity before editing its draft");
   }
@@ -480,12 +485,20 @@ app.patch("/api/activities/:activityId", (request, response) => {
       updatedBy: editor ? String(editor.display_name) : null,
     });
   }
-  const input = activityInput(body, user, { allowOfferingGroups: String(existing.created_by) !== user.id });
+  const input = activityInput(body, user, { allowOfferingGroups: true });
+  const oldTargets = activityTargetRows(activityId).map((target) => String(target.id));
+  if (JSON.stringify([...oldTargets].sort()) !== JSON.stringify([...input.teachingGroupIds].sort())) {
+    instructorAuthority.assertDestinations(user, String(existing.subject_offering_id), [...new Set([...oldTargets, ...input.teachingGroupIds])]);
+  }
   assertDocumentAssets(activityId, input.contentDocument);
   for (const document of blueprintDocuments(input.blueprint)) assertDocumentAssets(activityId, document);
   if (input.subjectOfferingId !== String(existing.subject_offering_id)) {
     throw new HttpError(409, "Move between subject offerings is not supported");
   }
+  const nextTopic = body.topicId === undefined
+    ? compatibleTopicId(existing.topic_id, input.subjectOfferingId, input.gradingPeriod)
+    : body.topicId === null || body.topicId === "" ? null : requiredText(body.topicId, "Topic");
+  if (nextTopic) assertTopicScope(getTopicRow(nextTopic), input.subjectOfferingId, input.gradingPeriod);
 
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -494,7 +507,7 @@ app.patch("/api/activities/:activityId", (request, response) => {
         grading_period = ?, title = ?, instructions = ?, requirements_json = ?,
         opens_at = ?, deadline_at = ?, max_bytes = ?, content_json = ?,
         accepted_extensions_json = ?, draft_revision = draft_revision + 1,
-        blueprint_json = ?, last_edited_by = ?, updated_at = ?
+        blueprint_json = ?, last_edited_by = ?, updated_at = ?, topic_id = ?
       WHERE id = ?
     `).run(
       input.gradingPeriod,
@@ -509,6 +522,7 @@ app.patch("/api/activities/:activityId", (request, response) => {
       JSON.stringify(input.blueprint),
       user.id,
       new Date().toISOString(),
+      nextTopic,
       activityId,
     );
     replaceActivityTargets(activityId, input.teachingGroupIds);
@@ -519,8 +533,7 @@ app.patch("/api/activities/:activityId", (request, response) => {
   }
 
   response.json(getActivityDetail(activityId, user, {
-    subjectOfferingId: input.subjectOfferingId,
-    teachingGroupId: input.teachingGroupIds[0],
+    ...scope,
     gradingPeriod: input.gradingPeriod,
   }));
 });
@@ -532,6 +545,7 @@ app.post("/api/activities/:activityId/publish", (request, response) => {
   const offeringId = String(activity.subject_offering_id);
   assertOfferingAccess(user, offeringId);
   assertActivityPermission(activity, user, "publish");
+  const scope = preflightActivityResponse(request, user, activity);
   if (String(activity.status) !== "draft") throw new HttpError(409, "This activity is already published");
   const expectedDraftRevision = Number((request.body as Record<string, unknown>)?.expectedDraftRevision);
   if (!Number.isInteger(expectedDraftRevision) || expectedDraftRevision !== Number(activity.draft_revision)) {
@@ -545,6 +559,7 @@ app.post("/api/activities/:activityId/publish", (request, response) => {
   ensureDateOrder(opensAt, deadlineAt);
   const targets = activityTargetRows(activityId);
   if (!targets.length) throw new HttpError(409, "Select at least one teaching group before publishing");
+  instructorAuthority.assertDestinations(user, offeringId, targets.map((target) => String(target.id)));
   for (const target of targets) assertGroupBelongsToOffering(offeringId, String(target.id));
   const blueprint = activityBlueprintFromRow(activity);
   const blueprintWarnings = publishBlueprintWarnings(blueprint);
@@ -621,7 +636,6 @@ app.post("/api/activities/:activityId/publish", (request, response) => {
     throw error;
   }
 
-  const scope = responseScope(request, user, activity);
   response.json(getActivityDetail(activityId, user, scope));
 });
 
@@ -631,11 +645,15 @@ app.post("/api/activities/:activityId/unpublish", (request, response) => {
   const activity = getActivityRow(activityId);
   assertOfferingAccess(user, String(activity.subject_offering_id));
   assertActivityPermission(activity, user, "publish");
+  const scope = preflightActivityResponse(request, user, activity);
+  if (String(activity.status) !== "published" || !activity.current_release_id) throw new HttpError(409, "This activity is not published");
+  instructorAuthority.assertDestinations(user, String(activity.subject_offering_id),
+    releaseScopeRows(String(activity.current_release_id)).map((group) => String(group.id)));
   db.prepare("UPDATE activities SET status = 'draft', updated_at = ? WHERE id = ?").run(
     new Date().toISOString(),
     activityId,
   );
-  response.json(getActivityDetail(activityId, user, responseScope(request, user, activity)));
+  response.json(getActivityDetail(activityId, user, scope));
 });
 
 app.post("/api/activities/:activityId/duplicate", async (request, response) => {
@@ -644,9 +662,23 @@ app.post("/api/activities/:activityId/duplicate", async (request, response) => {
   const source = getActivityRow(sourceId);
   const offeringId = String(source.subject_offering_id);
   assertOfferingAccess(user, offeringId);
+  instructorAuthority.assertRead(source, user);
+  const scope = preflightActivityResponse(request, user, source);
+  const sourceTargets = activityTargetRows(sourceId).map((target) => String(target.id));
+  const requestedTargets = (request.body as Record<string, unknown> | undefined)?.teachingGroupIds;
+  if (requestedTargets !== undefined && (!Array.isArray(requestedTargets) || !requestedTargets.length
+    || requestedTargets.some((value) => typeof value !== "string" || !value.trim()))) {
+    throw new HttpError(400, "Select at least one valid destination teaching group");
+  }
+  const destinationIds = requestedTargets === undefined ? sourceTargets : uniqueStringArray(requestedTargets);
+  instructorAuthority.assertDestinations(user, offeringId, destinationIds);
+  if (scope.teachingGroupId && !destinationIds.includes(scope.teachingGroupId)) {
+    throw new HttpError(400, "The selected response group must be a destination");
+  }
   const id = randomUUID();
   const now = new Date().toISOString();
   const sourceAssets = listActivityAssetRows(sourceId);
+  const sourceVersion = JSON.stringify([source, sourceTargets, sourceAssets]);
   const assetIdMap = new Map<string, string>();
   const copiedAssets: Array<Row & { newId: string; storedPath: string }> = [];
   try {
@@ -663,6 +695,15 @@ app.post("/api/activities/:activityId/duplicate", async (request, response) => {
     const content = remapDocumentAssets(activityDocumentFromRow(source), assetIdMap);
     const blueprint = remapBlueprintAssets(activityBlueprintFromRow(source), assetIdMap);
     const legacy = legacyFieldsFromDocument(content);
+    // Copying yields to other requests. Recheck the session, grants and source before any database write.
+    const currentUser = requireFaculty(request);
+    const currentSource = getActivityRow(sourceId);
+    instructorAuthority.assertRead(currentSource, currentUser);
+    instructorAuthority.assertDestinations(currentUser, offeringId, destinationIds);
+    preflightActivityResponse(request, currentUser, currentSource);
+    if (JSON.stringify([currentSource, activityTargetRows(sourceId).map((target) => String(target.id)), listActivityAssetRows(sourceId)]) !== sourceVersion) {
+      throw new HttpError(409, "The source activity changed. Review it before duplicating again");
+    }
     db.exec("BEGIN IMMEDIATE");
     try {
       db.prepare(`
@@ -690,11 +731,11 @@ app.post("/api/activities/:activityId/duplicate", async (request, response) => {
         JSON.stringify(content),
         String(source.accepted_extensions_json),
         user.id,
-        source.topic_id ? String(source.topic_id) : null,
+        compatibleTopicId(source.topic_id, offeringId, String(source.grading_period) as GradingPeriod),
         JSON.stringify(blueprint),
       );
-      for (const target of activityTargetRows(sourceId)) {
-        db.prepare("INSERT INTO activity_targets (activity_id, teaching_group_id) VALUES (?, ?)").run(id, String(target.id));
+      for (const targetId of destinationIds) {
+        db.prepare("INSERT INTO activity_targets (activity_id, teaching_group_id) VALUES (?, ?)").run(id, targetId);
       }
       const insertAsset = db.prepare(`
         INSERT INTO activity_assets (
@@ -727,15 +768,20 @@ app.post("/api/activities/:activityId/duplicate", async (request, response) => {
     throw error;
   }
   response.status(201).json(getActivityDetail(id, user, {
-    subjectOfferingId: offeringId,
-    teachingGroupId: activityTargetRows(id)[0]?.id ? String(activityTargetRows(id)[0].id) : null,
-    gradingPeriod: String(source.grading_period) as GradingPeriod,
+    ...scope,
   }));
 });
 
-app.post("/api/activities/:activityId/assets", assetUpload.single("file"), async (request, response, next) => {
+app.post("/api/activities/:activityId/assets", (request, _response, next) => {
+  const user = requireFaculty(request);
+  const activity = getActivityRow(routeParam(request, "activityId"));
+  assertActivityPermission(activity, user, "edit");
+  if (String(activity.status) !== "draft") throw new HttpError(409, "Unpublish the activity before adding materials");
+  next();
+}, assetUpload.single("file"), async (request, response, next) => {
   const tempPath = request.file?.path;
   let finalPath: string | null = null;
+  let recorded = false;
   try {
     const user = requireFaculty(request);
     const activityId = routeParam(request, "activityId");
@@ -751,6 +797,10 @@ app.post("/api/activities/:activityId/assets", assetUpload.single("file"), async
     await mkdir(dirname(finalPath), { recursive: true });
     const checksum = await sha256File(tempPath);
     await rename(tempPath, finalPath);
+    const currentUser = requireFaculty(request);
+    const currentActivity = getActivityRow(activityId);
+    assertActivityPermission(currentActivity, currentUser, "edit");
+    if (String(currentActivity.status) !== "draft") throw new HttpError(409, "Unpublish the activity before adding materials");
     const createdAt = new Date().toISOString();
     db.prepare(`
       INSERT INTO activity_assets (
@@ -770,9 +820,11 @@ app.post("/api/activities/:activityId/assets", assetUpload.single("file"), async
       checksum,
       createdAt,
     );
+    recorded = true;
     response.status(201).json(assetFromRow(getActivityAssetRow(assetId)));
   } catch (error) {
-    if (!finalPath && tempPath) await rm(tempPath, { force: true });
+    if (finalPath && !recorded) await rm(finalPath, { force: true });
+    if (tempPath) await rm(tempPath, { force: true });
     next(error);
   }
 });
@@ -804,7 +856,13 @@ app.get("/api/activity-assets/:assetId/file", (request, response, next) => {
   const asset = getActivityAssetRow(routeParam(request, "assetId"));
   const activity = getActivityRow(String(asset.activity_id));
   if (user.role === "faculty") {
-    assertOfferingAccess(user, String(activity.subject_offering_id));
+    if (!instructorAuthority.canRead(activity, user)) {
+      const filter = instructorAuthority.submissionFilter(user);
+      const released = db.prepare(`SELECT 1 FROM submissions s JOIN activities a ON a.id=s.activity_id
+        JOIN activity_release_assets ra ON ra.release_id=s.release_id
+        WHERE ra.asset_id=? AND ${filter.sql} LIMIT 1`).get(String(asset.id), ...filter.params);
+      if (!released) throw new HttpError(404, "Teaching file not found");
+    }
   } else {
     if (!activity.current_release_id) throw new HttpError(404, "Teaching file not found");
     assertStudentReleaseAccess(user.id, String(activity.current_release_id));
@@ -865,18 +923,26 @@ app.delete("/api/activities/:activityId/collaborators/:facultyId", (request, res
   response.json(listActivityCollaborators(String(activity.id)));
 });
 
+const submissionReceipts = new WeakMap<Request, ReturnType<typeof submissionReceiptContext>>();
 app.post(
   "/api/activities/:activityId/submissions",
+  (request, _response, next) => { submissionReceipts.set(request, submissionReceiptContext(request)); next(); },
   upload.single("file"),
   async (request, response, next) => {
     const tempPath = request.file?.path;
     let finalPath: string | null = null;
+    let recorded = false;
+    let replayed = false;
     try {
       const user = requireStudent(request);
       const activityId = routeParam(request, "activityId");
       if (!request.file || !tempPath) throw new HttpError(400, "Select a file to upload");
 
       const activity = getActivityRow(activityId);
+      const receipt = submissionReceipts.get(request);
+      if (!receipt || receipt.user.id !== user.id || String(receipt.activity.current_release_id) !== String(activity.current_release_id)) {
+        throw new HttpError(409, "The activity release changed during upload. Review it before submitting again");
+      }
       if (String(activity.status) !== "published" || !activity.current_release_id) {
         throw new HttpError(409, "This activity is not published");
       }
@@ -893,14 +959,6 @@ app.post(
       if (request.file.size > snapshot.maxBytes) throw new HttpError(413, "The file exceeds the activity limit");
 
       const idempotencyKey = request.header("idempotency-key")?.trim() || randomUUID();
-      const duplicate = db.prepare(`
-        SELECT id FROM submissions WHERE activity_id = ? AND student_id = ? AND idempotency_key = ?
-      `).get(activityId, user.id, idempotencyKey) as Row | undefined;
-      if (duplicate) {
-        await rm(tempPath, { force: true });
-        response.json(getActivityDetail(activityId, user, studentDetailScope(activity)));
-        return;
-      }
 
       const extension = extensionOf(request.file.originalname);
       if (!extension) throw new HttpError(415, "Only .py and .zip files are accepted");
@@ -921,26 +979,9 @@ app.post(
       if (!validationReport.valid && validationReport.mode === "strict") {
         throw new HttpError(422, "The submission does not match the published file requirements", "submission_validation_failed", { validationReport });
       }
-      const categoryLimit = extension === ".zip" ? 5 : 10;
-      const revisionCount = Number((db.prepare(`
-        SELECT COUNT(*) AS count FROM submissions
-        WHERE activity_id = ? AND student_id = ? AND normalized_filename LIKE ?
-      `).get(activityId, user.id, `%${extension}`) as { count: number }).count);
-      if (revisionCount >= categoryLimit) {
-        throw new HttpError(409, `The ${extension} revision limit of ${categoryLimit} has been reached`);
-      }
-
-      const revision = Number((db.prepare(`
-        SELECT COUNT(*) AS count FROM submissions WHERE activity_id = ? AND student_id = ?
-      `).get(activityId, user.id) as { count: number }).count) + 1;
-      const normalizedFilename = normalizeSubmissionFilename(
-        user.studentNumber ?? "student",
-        snapshot.title,
-        revision,
-        request.file.originalname,
-      );
       const submissionId = randomUUID();
-      finalPath = join(uploadsDir, activityId, user.id, submissionId, normalizedFilename);
+      // Opaque storage name lets the display revision be allocated atomically after I/O.
+      finalPath = join(uploadsDir, activityId, user.id, submissionId, `received${extension}`);
       await mkdir(dirname(finalPath), { recursive: true });
       const checksum = await sha256File(tempPath);
       await rename(tempPath, finalPath);
@@ -948,6 +989,30 @@ app.post(
       const receivedAt = new Date().toISOString();
       db.exec("BEGIN IMMEDIATE");
       try {
+        const current = submissionReceiptContext(request);
+        if (current.user.id !== user.id || String(current.activity.current_release_id) !== String(activity.current_release_id)) {
+          throw new HttpError(409, "The activity release changed during upload. Review it before submitting again");
+        }
+        getActivityDetail(activityId, user, studentDetailScope(current.activity));
+        const duplicate = db.prepare("SELECT * FROM submissions WHERE activity_id=? AND student_id=? AND idempotency_key=?")
+          .get(activityId, user.id, idempotencyKey) as Row | undefined;
+        if (duplicate) {
+          if (String(duplicate.sha256) !== checksum || Number(duplicate.size_bytes) !== request.file.size
+            || String(duplicate.original_filename) !== cleanOriginalFilename(request.file.originalname)
+            || (duplicate.completed_through_part_id ?? null) !== validationReport.completedThroughPartId
+            || String(duplicate.release_id) !== String(activity.current_release_id)) {
+            throw new HttpError(409, "This upload key already belongs to a different submission", "idempotency_conflict");
+          }
+          replayed = true;
+        } else {
+        const categoryLimit = extension === ".zip" ? 5 : 10;
+        const revisionCount = Number((db.prepare(`SELECT COUNT(*) AS count FROM submissions
+          WHERE activity_id=? AND student_id=? AND normalized_filename LIKE ?`)
+          .get(activityId, user.id, `%${extension}`) as { count: number }).count);
+        if (revisionCount >= categoryLimit) throw new HttpError(409, `The ${extension} revision limit of ${categoryLimit} has been reached`);
+        const revision = Number((db.prepare("SELECT COUNT(*) AS count FROM submissions WHERE activity_id=? AND student_id=?")
+          .get(activityId, user.id) as { count: number }).count) + 1;
+        const normalizedFilename = normalizeSubmissionFilename(user.studentNumber ?? "student", snapshot.title, revision, request.file.originalname);
         db.prepare(`
           UPDATE submissions SET is_current_submission = 0
           WHERE activity_id = ? AND student_id = ? AND is_current_submission = 1
@@ -974,17 +1039,18 @@ app.post(
           validationReport.completedThroughPartId,
           JSON.stringify(validationReport),
         );
+        }
         db.exec("COMMIT");
+        recorded = !replayed;
       } catch (error) {
         db.exec("ROLLBACK");
-        await rm(finalPath, { force: true });
-        finalPath = null;
         throw error;
       }
-
-      response.status(201).json(getActivityDetail(activityId, user, studentDetailScope(activity)));
+      if (replayed) await rm(finalPath, { force: true });
+      response.status(replayed ? 200 : 201).json(getActivityDetail(activityId, user, studentDetailScope(activity)));
     } catch (error) {
-      if (!finalPath && tempPath) await rm(tempPath, { force: true });
+      if (finalPath && !recorded) await rm(finalPath, { force: true });
+      if (tempPath) await rm(tempPath, { force: true });
       next(error);
     }
   },
@@ -1004,7 +1070,8 @@ app.get("/api/submissions/:submissionId/file", (request, response, next) => {
       throw new HttpError(403, "You cannot download another student's submission");
     }
   } else {
-    assertOfferingAccess(user, String(submission.subject_offering_id));
+    const group = optionalQuery(request, "teachingGroupId");
+    instructorAuthority.assertSubmission(submissionId, user, group && group !== "all" ? group : null);
   }
 
   const path = safeStoredFile(dataDir, String(submission.stored_path));
@@ -1024,7 +1091,8 @@ app.post("/api/submissions/:submissionId/evaluation", (request, response) => {
     JOIN activities a ON a.id = s.activity_id WHERE s.id = ?
   `).get(submissionId) as Row | undefined;
   if (!submission) throw new HttpError(404, "Submission not found");
-  assertOfferingAccess(user, String(submission.subject_offering_id));
+  const scope = preflightActivityResponse(request, user, getActivityRow(String(submission.activity_id)));
+  instructorAuthority.assertSubmission(submissionId, user, scope.teachingGroupId);
   if (Number(submission.is_current_submission) !== 1) {
     throw new HttpError(409, "Only the student's current submission can be evaluated");
   }
@@ -1050,13 +1118,6 @@ app.post("/api/submissions/:submissionId/evaluation", (request, response) => {
       updated_at = excluded.updated_at
   `).run(randomUUID(), submissionId, score, manualDeduction, comments, annotations, user.id, now, now);
 
-  const teachingGroupId = optionalQuery(request, "teachingGroupId");
-  const scope: ActivityScope = {
-    subjectOfferingId: String(submission.subject_offering_id),
-    teachingGroupId: teachingGroupId && teachingGroupId !== "all" ? teachingGroupId : null,
-    gradingPeriod: String(submission.grading_period) as GradingPeriod,
-  };
-  if (scope.teachingGroupId) assertGroupAccess(user, scope.subjectOfferingId, scope.teachingGroupId);
   response.json(getActivityDetail(String(submission.activity_id), user, scope));
 });
 
@@ -1088,11 +1149,12 @@ app.use((error: unknown, request: Request, response: Response, _next: NextFuncti
 });
 
 const port = Number(process.env.PORT || 4174);
+const bindAddress = process.env.ATOM_HOST || "0.0.0.0";
 const server = createServer(app);
 await new Promise<void>((resolve, reject) => {
   const failed = (error: NodeJS.ErrnoException) => reject(error);
   server.once("error", failed);
-  server.listen(port, "0.0.0.0", () => {
+  server.listen(port, bindAddress, () => {
     server.off("error", failed);
     resolve();
   });
@@ -1103,7 +1165,7 @@ await new Promise<void>((resolve, reject) => {
   throw error;
 });
 
-console.log(`ATOM server listening on http://0.0.0.0:${port}`);
+console.log(`ATOM server listening on http://${bindAddress}:${port}`);
 console.log(`ATOM data: ${join(dataDir, "atom.sqlite")}`);
 if (demoAccountsEnabled) console.warn("ATOM demo accounts are enabled for this development session.");
 if (!secureCookies) console.warn("ATOM is running in HTTP LAN mode. Traffic and session cookies are not encrypted.");
@@ -1142,6 +1204,20 @@ function requireStudent(request: Request): AuthUser {
   const user = resolveUser(request);
   if (user.role !== "student") throw new HttpError(403, "Student access is required");
   return user;
+}
+
+function submissionReceiptContext(request: Request) {
+  const user = requireStudent(request);
+  const activity = getActivityRow(routeParam(request, "activityId"));
+  if (String(activity.status) !== "published" || !activity.current_release_id) throw new HttpError(409, "This activity is not published");
+  assertStudentReleaseAccess(user.id, String(activity.current_release_id));
+  const release = db.prepare("SELECT snapshot_json FROM activity_releases WHERE id=? AND activity_id=?")
+    .get(String(activity.current_release_id), String(activity.id)) as Row | undefined;
+  if (!release) throw new HttpError(409, "The published activity release is unavailable");
+  const snapshot = JSON.parse(String(release.snapshot_json)) as ActivitySnapshot;
+  if (Date.now() < Date.parse(snapshot.opensAt)) throw new HttpError(409, "This activity is not open yet");
+  if (Date.now() > Date.parse(snapshot.deadlineAt)) throw new HttpError(409, "The activity deadline has passed");
+  return { user, activity, snapshot };
 }
 
 function groupPreviewIdentities(): { faculty: AuthUser[]; students: AuthUser[] } {
@@ -1231,6 +1307,12 @@ function responseScope(request: Request, user: AuthUser, activity: Row): Activit
   const groupValue = optionalQuery(request, "teachingGroupId");
   const teachingGroupId = groupValue && groupValue !== "all" ? groupValue : null;
   const subjectOfferingId = String(activity.subject_offering_id);
+  const requestedOffering = optionalQuery(request, "subjectOfferingId");
+  const requestedPeriod = optionalQuery(request, "gradingPeriod");
+  if ((requestedOffering && requestedOffering !== subjectOfferingId)
+    || (requestedPeriod && requestedPeriod !== String(activity.grading_period))) {
+    throw new HttpError(400, "Select the activity's subject offering and grading period");
+  }
   assertOfferingAccess(user, subjectOfferingId);
   if (teachingGroupId) assertGroupAccess(user, subjectOfferingId, teachingGroupId);
   return {
@@ -1238,6 +1320,12 @@ function responseScope(request: Request, user: AuthUser, activity: Row): Activit
     teachingGroupId,
     gradingPeriod: String(activity.grading_period) as GradingPeriod,
   };
+}
+
+function preflightActivityResponse(request: Request, user: AuthUser, activity: Row): ActivityScope {
+  const scope = responseScope(request, user, activity);
+  getActivityDetail(String(activity.id), user, scope);
+  return scope;
 }
 
 function studentDetailScope(activity: Row): ActivityScope {
@@ -1285,6 +1373,17 @@ function assertStudentReleaseAccess(studentId: string, releaseId: string): void 
 }
 
 function listActivities(user: AuthUser, scope: ActivityScope): Record<string, unknown>[] {
+  if (user.role === "faculty") {
+    const rows = db.prepare(`
+      SELECT a.*, r.snapshot_json AS release_snapshot, r.version AS release_version, r.published_at
+      FROM activities a LEFT JOIN activity_releases r ON r.id = a.current_release_id
+      WHERE a.subject_offering_id = ? AND a.grading_period = ? ORDER BY a.created_at DESC
+    `).all(scope.subjectOfferingId, scope.gradingPeriod) as Row[];
+    return rows.flatMap((row) => {
+      const visible = facultyActivityView(row, user, scope);
+      return visible ? [activitySummary(visible, user, scope)] : [];
+    });
+  }
   const rows = db.prepare(`
     SELECT DISTINCT a.*, r.snapshot_json AS release_snapshot,
       r.version AS release_version, r.published_at
@@ -1371,6 +1470,26 @@ function assessmentStream(user: AuthUser, scope: ActivityScope): Record<string, 
   };
 }
 
+/** Evidence authority does not reveal a later private draft. Use a qualifying immutable release. */
+function facultyActivityView(row: Row, user: AuthUser, scope: ActivityScope): Row | undefined {
+  if (instructorAuthority.canRead(row, user, scope.teachingGroupId)) return row;
+  const filter = instructorAuthority.submissionFilter(user, scope.teachingGroupId);
+  const release = db.prepare(`SELECT r.* FROM submissions s JOIN activities a ON a.id=s.activity_id
+    JOIN activity_releases r ON r.id=s.release_id
+    WHERE s.activity_id=? AND s.is_current_submission=1 AND ${filter.sql}
+    ORDER BY r.version DESC LIMIT 1`).get(String(row.id), ...filter.params) as Row | undefined;
+  if (!release) return undefined;
+  const snapshot = JSON.parse(String(release.snapshot_json)) as ActivitySnapshot;
+  return { ...row, evidence_only: true, title: snapshot.title, instructions: snapshot.instructions,
+    requirements_json: JSON.stringify(snapshot.requirements), opens_at: snapshot.opensAt, deadline_at: snapshot.deadlineAt,
+    max_bytes: snapshot.maxBytes, accepted_extensions_json: JSON.stringify(snapshot.acceptedExtensions),
+    content_json: JSON.stringify(snapshot.contentDocument ?? legacyActivityDocument(snapshot.instructions, snapshot.requirements)),
+    blueprint_json: JSON.stringify(snapshot.blueprint ?? defaultActivityBlueprint()),
+    current_release_id: release.id, release_snapshot: release.snapshot_json, release_version: release.version,
+    status: "published", published_at: release.published_at, updated_at: release.published_at,
+    topic_id: null, manual_position: null, draft_revision: 0 };
+}
+
 function activitySummary(row: Row, user: AuthUser, scope: ActivityScope): Record<string, unknown> {
   const snapshot = user.role === "student" && row.release_snapshot
     ? JSON.parse(String(row.release_snapshot)) as ActivitySnapshot
@@ -1383,11 +1502,13 @@ function activitySummary(row: Row, user: AuthUser, scope: ActivityScope): Record
       : activityDocumentFromRow(row);
   const summaryBlueprint = snapshot?.blueprint ? validateActivityBlueprint(snapshot.blueprint) : activityBlueprintFromRow(row);
   const topic = row.topic_id
-    ? db.prepare("SELECT * FROM assessment_topics WHERE id = ?").get(String(row.topic_id)) as Row | undefined
+    ? db.prepare("SELECT * FROM assessment_topics WHERE id = ? AND subject_offering_id = ? AND grading_period = ?")
+      .get(String(row.topic_id), String(row.subject_offering_id), String(row.grading_period)) as Row | undefined
     : undefined;
   const submissionState = user.role === "student" ? studentSubmissionState(activityId, user.id) : null;
   return {
     id: activityId,
+    evidenceOnly: Boolean(row.evidence_only),
     subjectOfferingId: String(row.subject_offering_id),
     gradingPeriod: String(row.grading_period),
     title: snapshot?.title ?? String(row.title),
@@ -1406,13 +1527,13 @@ function activitySummary(row: Row, user: AuthUser, scope: ActivityScope): Record
     manualPosition: row.manual_position === null || row.manual_position === undefined ? null : Number(row.manual_position),
     currentUserSubmissionState: submissionState,
     draftRevision: user.role === "faculty" ? Number(row.draft_revision ?? 1) : undefined,
-    targetGroups: activityTargetRows(activityId).map(groupFromRow),
+    targetGroups: row.evidence_only ? [] : activityTargetRows(activityId).map(groupFromRow),
     publishedScope: row.current_release_id ? releaseScopeRows(String(row.current_release_id)) : [],
   };
 }
 
 function getActivityDetail(activityId: string, user: AuthUser, scope: ActivityScope): Record<string, unknown> {
-  const row = db.prepare(`
+  let row = db.prepare(`
     SELECT a.*, r.snapshot_json AS release_snapshot,
       r.version AS release_version, r.published_at
     FROM activities a
@@ -1423,7 +1544,9 @@ function getActivityDetail(activityId: string, user: AuthUser, scope: ActivitySc
     throw new HttpError(404, "Activity not found");
   }
   assertOfferingAccess(user, String(row.subject_offering_id));
-  if (!activityVisibleInScope(row, user, scope)) throw new HttpError(404, "Activity not found");
+  if (user.role === "faculty") row = facultyActivityView(row, user, scope);
+  else if (!activityVisibleInScope(row, user, scope)) row = undefined;
+  if (!row) throw new HttpError(404, "Activity not found");
 
   const snapshot = user.role === "student" && row.release_snapshot
     ? JSON.parse(String(row.release_snapshot)) as ActivitySnapshot
@@ -1454,17 +1577,17 @@ function getActivityDetail(activityId: string, user: AuthUser, scope: ActivitySc
     requirements: snapshot?.requirements ?? parseStringArray(String(row.requirements_json)),
     acceptedExtensions: snapshot?.acceptedExtensions ?? parseAcceptedExtensions(String(row.accepted_extensions_json)),
     maxBytes: snapshot?.maxBytes ?? Number(row.max_bytes),
-    assets: user.role === "student"
+    assets: user.role === "student" || row.evidence_only
       ? listReleaseAssets(String(row.current_release_id)).map(assetFromRow)
       : listActivityAssetRows(activityId).map(assetFromRow),
   };
 
   if (user.role === "faculty") {
-    detail.submissions = listCurrentSubmissions(activityId, scope);
+    detail.submissions = listCurrentSubmissions(activityId, scope, user);
     detail.draftRevision = Number(row.draft_revision);
-    detail.permissions = activityPermissions(row, user);
-    detail.collaborators = listActivityCollaborators(activityId);
-    detail.availableCollaborators = listOfferingFaculty(String(row.subject_offering_id), String(row.created_by));
+    detail.permissions = row.evidence_only ? { isCreator: false, canEdit: false, canPublish: false, canManageCollaborators: false } : activityPermissions(row, user);
+    detail.collaborators = row.evidence_only ? [] : listActivityCollaborators(activityId);
+    detail.availableCollaborators = row.evidence_only ? [] : listOfferingFaculty(String(row.subject_offering_id), String(row.created_by));
   } else {
     const history = (db.prepare(`
       SELECT s.*, e.id AS evaluation_id, e.score, e.manual_deduction,
@@ -1481,6 +1604,7 @@ function getActivityDetail(activityId: string, user: AuthUser, scope: ActivitySc
 }
 
 function activityVisibleInScope(row: Row, user: AuthUser, scope: ActivityScope): boolean {
+  if (user.role === "faculty") return instructorAuthority.canRead(row, user, scope.teachingGroupId);
   if (user.role === "student" && String(row.status) !== "published") return false;
   const source = user.role === "student" ? "activity_release_scopes" : "activity_targets";
   const ownerColumn = user.role === "student" ? "release_id" : "activity_id";
@@ -1544,7 +1668,8 @@ function eligibleStudentWhere(activityId: string, scope: ActivityScope): { sql: 
   };
 }
 
-function countEligibleStudents(activityId: string, scope: ActivityScope, _user: AuthUser): number {
+function countEligibleStudents(activityId: string, scope: ActivityScope, user: AuthUser): number {
+  if (user.role === "faculty") return instructorAuthority.eligibleStudentCount(activityId, user, scope.teachingGroupId);
   const eligible = eligibleStudentWhere(activityId, scope);
   return Number((db.prepare(`
     SELECT COUNT(DISTINCT e.student_id) AS count FROM enrollments e
@@ -1559,27 +1684,26 @@ function countCurrentSubmissions(activityId: string, scope: ActivityScope, user:
       WHERE activity_id = ? AND student_id = ? AND is_current_submission = 1
     `).get(activityId, user.id) as { count: number }).count);
   }
-  const eligible = eligibleStudentWhere(activityId, scope);
+  const eligible = instructorAuthority.submissionFilter(user, scope.teachingGroupId);
   return Number((db.prepare(`
-    SELECT COUNT(DISTINCT s.student_id) AS count FROM submissions s
-    JOIN enrollments e ON e.student_id = s.student_id AND e.subject_offering_id = ?
+    SELECT COUNT(*) AS count FROM submissions s JOIN activities a ON a.id = s.activity_id
     WHERE s.activity_id = ? AND s.is_current_submission = 1 AND ${eligible.sql}
-  `).get(scope.subjectOfferingId, activityId, ...eligible.params) as { count: number }).count);
+  `).get(activityId, ...eligible.params) as { count: number }).count);
 }
 
-function listCurrentSubmissions(activityId: string, scope: ActivityScope): Record<string, unknown>[] {
-  const eligible = eligibleStudentWhere(activityId, scope);
+function listCurrentSubmissions(activityId: string, scope: ActivityScope, user: AuthUser): Record<string, unknown>[] {
+  const eligible = instructorAuthority.submissionFilter(user, scope.teachingGroupId);
   return (db.prepare(`
     SELECT s.*, u.student_number, u.display_name,
       e.id AS evaluation_id, e.score, e.manual_deduction, e.comments, e.annotations, e.evaluated_at
     FROM submissions s
     JOIN users u ON u.id = s.student_id
-    JOIN enrollments en ON en.student_id = s.student_id AND en.subject_offering_id = ?
+    JOIN activities a ON a.id = s.activity_id
     LEFT JOIN evaluations e ON e.submission_id = s.id
     WHERE s.activity_id = ? AND s.is_current_submission = 1
-      AND ${eligible.sql.replaceAll("e.student_id", "en.student_id")}
+      AND ${eligible.sql}
     ORDER BY u.student_number
-  `).all(scope.subjectOfferingId, activityId, ...eligible.params) as Row[]).map(submissionFromRow);
+  `).all(activityId, ...eligible.params) as Row[]).map(submissionFromRow);
 }
 
 function submissionFromRow(row: Row): Record<string, unknown> {
@@ -1693,6 +1817,12 @@ function topicFromRow(row: Row): Record<string, unknown> {
   };
 }
 
+function compatibleTopicId(value: unknown, offeringId: string, period: GradingPeriod): string | null {
+  if (!value) return null;
+  return db.prepare("SELECT 1 FROM assessment_topics WHERE id=? AND subject_offering_id=? AND grading_period=?")
+    .get(String(value), offeringId, period) ? String(value) : null;
+}
+
 function topicTitle(value: unknown): string {
   const title = requiredText(value, "Topic name");
   if (title.length > 120) throw new HttpError(400, "Topic names cannot exceed 120 characters");
@@ -1730,7 +1860,12 @@ function moveManualEntity(table: "assessment_topics", entityId: string, targetIn
   }
 }
 
-function moveActivity(activity: Row, targetIndex: number, topicId: string | null): void {
+function moveActivity(activity: Row, targetIndex: number, topicId: string | null, user: AuthUser): void {
+  const affected = db.prepare(`SELECT * FROM activities
+    WHERE subject_offering_id=? AND grading_period=? AND topic_id IS ?
+      AND id<>? AND manual_position IS NOT NULL AND manual_position>=?`)
+    .all(String(activity.subject_offering_id), String(activity.grading_period), topicId, String(activity.id), targetIndex) as Row[];
+  for (const sibling of affected) assertActivityPermission(sibling, user, "edit");
   db.exec("BEGIN IMMEDIATE");
   try {
     if (topicId) {
@@ -1865,12 +2000,14 @@ function parseValidationReport(value: string): Record<string, unknown> | null {
 }
 
 function assertActivityPermission(activity: Row, user: AuthUser, permission: "edit" | "publish"): void {
+  instructorAuthority.assertRead(activity, user);
   const permissions = activityPermissions(activity, user);
   if (permission === "edit" && !permissions.canEdit) throw new HttpError(403, "You cannot edit this activity");
   if (permission === "publish" && !permissions.canPublish) throw new HttpError(403, "You cannot change this activity's publication state");
 }
 
 function assertActivityCreator(activity: Row, user: AuthUser): void {
+  instructorAuthority.assertRead(activity, user);
   if (String(activity.created_by) !== user.id) throw new HttpError(403, "Only the activity creator can manage collaborators");
 }
 
@@ -2088,6 +2225,7 @@ function requiredQuery(request: Request, name: string): string {
 
 function optionalQuery(request: Request, name: string): string | null {
   const value = request.query[name];
+  if (value !== undefined && typeof value !== "string") throw new HttpError(400, `Invalid ${name}`);
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 

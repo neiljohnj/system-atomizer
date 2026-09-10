@@ -171,8 +171,8 @@ export const atomApi = {
     return request<ActivityDetail>(`/api/activities/${activityId}`, { method: "PATCH", body: input });
   },
 
-  duplicateActivity(activityId: string) {
-    return request<ActivityDetail>(`/api/activities/${activityId}/duplicate`, { method: "POST" });
+  duplicateActivity(activityId: string, teachingGroupIds?: string[]) {
+    return request<ActivityDetail>(`/api/activities/${activityId}/duplicate`, { method: "POST", body: teachingGroupIds ? { teachingGroupIds } : undefined });
   },
 
   publishActivity(activityId: string, scope: ActivityScope, expectedDraftRevision: number, acknowledgeRubricMismatch = false) {

@@ -21,6 +21,7 @@ import type {
   Submission,
 } from "../../types";
 import { EvaluationDialog } from "./EvaluationDialog";
+import { DuplicateActivityDialog } from "./DuplicateActivityDialog";
 
 const RichDocumentRenderer = lazy(() => import("../authoring/RichDocumentRenderer"));
 
@@ -53,6 +54,8 @@ export function FacultyWorkspace({
   const [detail, setDetail] = useState<ActivityAvailableDetail | null>(null);
   const [evaluationTarget, setEvaluationTarget] = useState<Submission | null>(null);
   const [busy, setBusy] = useState(false);
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [actionError, setActionError] = useState("");
   const navigate = useNavigate();
 
   const loadDetail = useCallback(async (activityId: string) => {
@@ -77,11 +80,13 @@ export function FacultyWorkspace({
   const perform = async (work: () => Promise<ActivityDetail>) => {
     try {
       setBusy(true);
+      setActionError("");
       const updated = await work();
       if (!updated.contentAvailable) throw new Error("This activity is not available to faculty");
       setDetail(updated);
       await onChanged();
     } catch (error) {
+      setActionError(error instanceof Error ? error.message : "ATOM could not complete the action");
       onError(error instanceof Error ? error.message : "ATOM could not complete the action");
       throw error;
     } finally {
@@ -94,13 +99,15 @@ export function FacultyWorkspace({
     try {
       await perform(() => atomApi.recordEvaluation(evaluationTarget.id, input, scope));
       setEvaluationTarget(null);
-    } catch {
-      // perform surfaces the server message.
+    } catch (error) {
+      throw error; // The dialog retains entered values and displays the rejection inline.
     }
   };
 
   return (
     <div className="faculty-workspace-grid">
+      {actionError ? <p role="alert" className="publish-warning">{actionError}</p> : null}
+      {duplicateOpen && detail ? <DuplicateActivityDialog activity={detail} offering={offering} onClose={() => setDuplicateOpen(false)} onCreated={async created => { await onChanged(); navigate(`/subjects/${offering.id}/activities/${created.id}?group=all&period=${created.gradingPeriod}`); }} /> : null}
       <section className="activity-index">
         <header className="section-header">
           <div>
@@ -143,7 +150,7 @@ export function FacultyWorkspace({
       <aside className="activity-detail">
         {detail ? (
           <>
-            <header className="detail-header">
+            {detail.evidenceOnly ? <p className="scope-banner">Reviewing an immutable release for your authorized submissions.</p> : null}<header className="detail-header">
               <div>
                 <h2>{detail.title}</h2>
                 <div className="detail-state"><Status state={detail.status} />{detail.releaseVersion ? <span>Release {detail.releaseVersion}</span> : null}</div>
@@ -152,10 +159,10 @@ export function FacultyWorkspace({
                 {detail.status === "draft" ? (
                   <>
                     {detail.permissions?.canEdit ? <button className="button button--primary" onClick={() => navigate(`/subjects/${offering.id}/activities/${detail.id}/edit?group=${scope.teachingGroupId}&period=${scope.gradingPeriod}`)}><Pencil size={15} />Open authoring</button> : null}
-                    <button className="button" disabled={busy} onClick={() => void perform(() => atomApi.duplicateActivity(detail.id))}><Copy size={15} />Duplicate</button>
+                    {!detail.evidenceOnly ? <button className="button" disabled={busy} onClick={() => setDuplicateOpen(true)}><Copy size={15} />Duplicate</button> : null}
                   </>
                 ) : (
-                  <>{detail.permissions?.canPublish ? <button className="button" disabled={busy} onClick={() => void perform(() => atomApi.unpublishActivity(detail.id, scope))}>Unpublish</button> : null}<button className="button" disabled={busy} onClick={() => void perform(() => atomApi.duplicateActivity(detail.id))}><Copy size={15} />Duplicate</button></>
+                  <>{detail.permissions?.canPublish ? <button className="button" disabled={busy} onClick={() => void perform(() => atomApi.unpublishActivity(detail.id, scope)).catch(() => {})}>Unpublish</button> : null}{!detail.evidenceOnly ? <button className="button" disabled={busy} onClick={() => setDuplicateOpen(true)}><Copy size={15} />Duplicate</button> : null}</>
                 )}
               </div>
             </header>

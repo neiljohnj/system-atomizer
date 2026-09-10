@@ -1,3 +1,4 @@
+import { newIdentifier } from "../../identifier";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import {
   AlertTriangle, ArrowLeft, CalendarClock, Check, Copy, Download, FileArchive,
@@ -11,6 +12,7 @@ import type {
   Role, SubjectOffering, Submission,
 } from "../../types";
 import { EvaluationDialog } from "../faculty/EvaluationDialog";
+import { DuplicateActivityDialog } from "../faculty/DuplicateActivityDialog";
 
 const RichDocumentRenderer = lazy(() => import("../authoring/RichDocumentRenderer"));
 
@@ -31,6 +33,8 @@ export function ActivityDetailPage({ offering, scope, activityId, role, onChange
   const [detail, setDetail] = useState<ActivityDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [actionError, setActionError] = useState("");
   const [evaluationTarget, setEvaluationTarget] = useState<Submission | null>(null);
   const [pending, setPending] = useState<PendingFile | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -47,24 +51,20 @@ export function ActivityDetailPage({ offering, scope, activityId, role, onChange
   if (!detail) return <div className="stream-empty"><AlertTriangle size={34} /><h2>Activity unavailable</h2><Link className="button" to={backHref}>Back to activities</Link></div>;
 
   const performFacultyAction = async (action: "duplicate" | "unpublish") => {
+    if (action === "duplicate") { setDuplicateOpen(true); return; }
     try {
       setBusy(true);
-      if (action === "duplicate") {
-        const duplicate = await atomApi.duplicateActivity(detail.id);
-        await onChanged();
-        navigate(`/subjects/${offering.id}/activities/${duplicate.id}?${searchParams}`);
-      } else {
+      setActionError("");
         setDetail(await atomApi.unpublishActivity(detail.id, scope));
         await onChanged();
-      }
-    } catch (error) { onError(error instanceof Error ? error.message : "The activity could not be updated"); }
+    } catch (error) { setActionError(error instanceof Error ? error.message : "The activity could not be updated"); }
     finally { setBusy(false); }
   };
 
   const recordEvaluation = async (input: EvaluationInput) => {
     if (!evaluationTarget) return;
     try { setBusy(true); setDetail(await atomApi.recordEvaluation(evaluationTarget.id, input, scope)); setEvaluationTarget(null); await onChanged(); }
-    catch (error) { onError(error instanceof Error ? error.message : "The evaluation could not be recorded"); }
+    catch (error) { throw error; }
     finally { setBusy(false); }
   };
 
@@ -74,11 +74,13 @@ export function ActivityDetailPage({ offering, scope, activityId, role, onChange
 
   const available = detail as ActivityAvailableDetail;
   return <main className={`activity-page activity-page--${role}`}>
-    <header className="activity-page__header">
+    {actionError ? <p role="alert" className="publish-warning">{actionError}</p> : null}
+    {duplicateOpen ? <DuplicateActivityDialog activity={available} offering={offering} onClose={() => setDuplicateOpen(false)} onCreated={async created => { await onChanged(); navigate(`/subjects/${offering.id}/activities/${created.id}?group=all&period=${created.gradingPeriod}`); }} /> : null}
+    {available.evidenceOnly ? <p className="scope-banner">Reviewing an immutable release for your authorized submissions. The current draft is unavailable in this scope.</p> : null}<header className="activity-page__header">
       <Link className="all-subjects-link" to={backHref}><ArrowLeft size={16} />Back to activities</Link>
       <div className="activity-page__identity"><span>{available.topic?.title ?? "No topic"}</span><h1>{available.title}</h1><div><span className={`status status--${available.status}`}>{available.status === "published" ? "Published" : "Draft"}</span>{available.releaseVersion ? <span>Release {available.releaseVersion}</span> : null}<span>{available.scheduleState === "scheduled" ? "Scheduled" : available.scheduleState === "open" ? "Open" : "Closed"}</span></div></div>
       <dl className="activity-page__schedule"><div><dt>Opens</dt><dd>{formatDateTime(available.opensAt)}</dd></div><div><dt>Deadline</dt><dd>{formatDateTime(available.deadlineAt)}</dd></div></dl>
-      {role === "faculty" ? <div className="activity-page__actions">{available.permissions?.canEdit ? <Link className="button button--primary" to={`/subjects/${offering.id}/activities/${available.id}/edit?${searchParams}`}><Pencil size={15} />Edit</Link> : null}<button className="button" disabled={busy} onClick={() => void performFacultyAction("duplicate")}><Copy size={15} />Duplicate</button>{available.status === "published" && available.permissions?.canPublish ? <button className="button" disabled={busy} onClick={() => void performFacultyAction("unpublish")}>Unpublish</button> : null}</div> : null}
+      {role === "faculty" ? <div className="activity-page__actions">{available.permissions?.canEdit ? <Link className="button button--primary" to={`/subjects/${offering.id}/activities/${available.id}/edit?${searchParams}`}><Pencil size={15} />Edit</Link> : null}{!available.evidenceOnly ? <button className="button" disabled={busy} onClick={() => void performFacultyAction("duplicate")}><Copy size={15} />Duplicate</button> : null}{available.status === "published" && available.permissions?.canPublish ? <button className="button" disabled={busy} onClick={() => void performFacultyAction("unpublish")}>Unpublish</button> : null}</div> : null}
     </header>
 
     {role === "faculty" ? <FacultyActivityBody detail={available} busy={busy} onEvaluate={setEvaluationTarget} onError={onError} /> : <StudentActivityBody detail={available} pending={pending} setPending={setPending} inputRef={inputRef} busy={busy} setBusy={setBusy} onChanged={async (updated) => { setDetail(updated); await onChanged(); }} onError={onError} />}
@@ -100,7 +102,7 @@ function StudentActivityBody({ detail, pending, setPending, inputRef, busy, setB
     if (!file) return;
     const extension = `.${file.name.split(".").pop()?.toLowerCase()}`;
     if (!detail.acceptedExtensions.includes(extension)) { onError(`This activity accepts ${detail.acceptedExtensions.join(" or ")}`); return; }
-    setPending({ file, idempotencyKey: crypto.randomUUID() });
+    setPending({ file, idempotencyKey: newIdentifier() });
   };
   const upload = async () => {
     if (!pending || (requiresPart && !completedThroughPartId)) return;
@@ -144,7 +146,7 @@ function ValidationSummary({ submission }: { submission: Submission }) {
 
 function LegacyStudentActivityBody({ detail, pending, setPending, inputRef, busy, setBusy, onChanged, onError }: { detail: ActivityAvailableDetail; pending: PendingFile | null; setPending: (value: PendingFile | null) => void; inputRef: React.RefObject<HTMLInputElement | null>; busy: boolean; setBusy: (value: boolean) => void; onChanged: (detail: ActivityDetail) => Promise<void>; onError: (message: string) => void }) {
   const [completedThroughPartId, setCompletedThroughPartId] = useState("");
-  const selectFile = (file: File | undefined) => { if (!file) return; const extension = `.${file.name.split(".").pop()?.toLowerCase()}`; if (!detail.acceptedExtensions.includes(extension)) { onError(`This activity accepts ${detail.acceptedExtensions.join(" or ")}`); return; } setPending({ file, idempotencyKey: crypto.randomUUID() }); };
+  const selectFile = (file: File | undefined) => { if (!file) return; const extension = `.${file.name.split(".").pop()?.toLowerCase()}`; if (!detail.acceptedExtensions.includes(extension)) { onError(`This activity accepts ${detail.acceptedExtensions.join(" or ")}`); return; } setPending({ file, idempotencyKey: newIdentifier() }); };
   const drop = (event: DragEvent<HTMLDivElement>) => { event.preventDefault(); selectFile(event.dataTransfer.files[0]); };
   const upload = async () => { if (!pending) return; try { setBusy(true); const updated = await atomApi.uploadSubmission(detail.id, pending.file, pending.idempotencyKey, completedThroughPartId || undefined); setPending(null); if (inputRef.current) inputRef.current.value = ""; await onChanged(updated); } catch (error) { onError(error instanceof Error ? error.message : "The upload could not be completed"); } finally { setBusy(false); } };
   const canUpload = detail.scheduleState === "open";

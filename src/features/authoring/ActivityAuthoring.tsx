@@ -1,3 +1,4 @@
+import { newIdentifier } from "../../identifier";
 import * as Checkbox from "@radix-ui/react-checkbox";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Select from "@radix-ui/react-select";
@@ -16,10 +17,10 @@ import type {
 } from "../../types";
 import { RichSectionEditor } from "./RichDocument";
 import RichDocumentRenderer from "./RichDocumentRenderer";
-import { clearRecovery, readRecovery, writeRecovery } from "./recoveryStore";
+import { clearRecovery, readRecovery, rememberRecovery, writeRecovery } from "./recoveryStore";
 import { RubricDialog, SubmissionRequirementsDialog, TeachingGroupPicker } from "./StructuredAuthoringDialogs";
 
-type SyncState = "saved" | "saving" | "device" | "conflict";
+type SyncState = "saved" | "saving" | "device" | "memory" | "conflict";
 
 export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: BootstrapPayload; onError: (message: string) => void }) {
   const { offeringId = "", activityId } = useParams();
@@ -32,12 +33,17 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
   const [draft, setDraft] = useState<ActivityInput | null>(null);
   const draftRef = useRef<ActivityInput | null>(null);
   const serverFingerprint = useRef("");
+  const deviceFingerprint = useRef("");
+  const saveInFlight = useRef(false);
+  const contextGeneration = useRef(0);
+  const [recoveryError, setRecoveryError] = useState("");
   const [syncState, setSyncState] = useState<SyncState>("saved");
   const [conflict, setConflict] = useState<DraftConflict | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [editorGeneration, setEditorGeneration] = useState(0);
   const [publishOpen, setPublishOpen] = useState(false);
+  const [publishError, setPublishError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("edit");
   const narrowViewport = useNarrowViewport(700);
@@ -50,7 +56,7 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
 
   useEffect(() => { draftRef.current = draft; }, [draft]);
   useEffect(() => {
-    window.dispatchEvent(new CustomEvent("atom:draft-sync", { detail: { unsynced: syncState !== "saved" } }));
+    window.dispatchEvent(new CustomEvent("atom:draft-sync", { detail: { unsynced: syncState !== "saved", deviceSaved: syncState === "device" } }));
     return () => { window.dispatchEvent(new CustomEvent("atom:draft-sync", { detail: { unsynced: false } })); };
   }, [syncState]);
 
@@ -68,6 +74,7 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
 
   const load = useCallback(async () => {
     if (!activityId) return;
+    const generation = ++contextGeneration.current;
     try {
       setLoading(true);
       const [activityResponse, streamResponse] = await Promise.all([
@@ -78,11 +85,17 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
       setTopics(streamResponse.topics);
       const serverDraft = inputFromDetail(loaded);
       let nextDraft = serverDraft;
-      const local = await readRecovery(`${userId}:${activityId}`).catch(() => null);
+      const local = await readRecovery(`${userId}:${activityId}`).catch(() => {
+        if (generation === contextGeneration.current) setRecoveryError("Device recovery could not be read. Keep this tab open until changes are saved to ATOM.");
+        return null;
+      });
+      if (generation !== contextGeneration.current) return;
+      deviceFingerprint.current = local?.persisted ? fingerprint(local.input) : "";
+      if (local && !local.persisted) setRecoveryError("These changes are held in this tab. Keep it open until they are saved to ATOM.");
       if (local && fingerprint(local.input) !== fingerprint(serverDraft)) {
         if (local.serverRevision === loaded.draftRevision) {
           nextDraft = local.input;
-          setSyncState("device");
+          setSyncState(local.persisted ? "device" : "memory");
         } else {
           setConflict({
             code: "draft_conflict",
@@ -101,21 +114,25 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
       setDraft(nextDraft);
       setEditorGeneration((value) => value + 1);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "The activity could not be opened");
+      if (generation === contextGeneration.current) onError(error instanceof Error ? error.message : "The activity could not be opened");
     } finally {
-      setLoading(false);
+      if (generation === contextGeneration.current) setLoading(false);
     }
   }, [activityId, onError, scope, userId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { contextGeneration.current++; }; }, [load]);
 
   const saveDraft = useCallback(async (input: ActivityInput, forcedRevision?: number) => {
     if (!activityId || !detail?.permissions?.canEdit || detail.status !== "draft") return;
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
+    const generation = contextGeneration.current;
     const submitted = { ...input, baseRevision: forcedRevision ?? input.baseRevision };
     const submittedFingerprint = fingerprint(input);
     try {
       setSyncState("saving");
       const updated = requireAvailableActivity(await atomApi.updateActivity(activityId, submitted));
+      if (generation !== contextGeneration.current) return;
       setDetail(updated);
       serverFingerprint.current = submittedFingerprint;
       const current = draftRef.current;
@@ -125,15 +142,19 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
         setDraft(clean);
         setSyncState("saved");
         setConflict(null);
-        await clearRecovery(recoveryKey);
+        await clearRecovery(recoveryKey).catch(() => setRecoveryError("Saved to ATOM; the older device recovery copy could not be cleared."));
+        if (generation === contextGeneration.current && input.gradingPeriod !== scope.gradingPeriod) {
+          const query = new URLSearchParams(searchParams); query.set("period", input.gradingPeriod);
+          navigate(`/subjects/${offeringId}/activities/${activityId}/edit?${query}`, { replace: true });
+        }
       } else if (current) {
         const rebased = { ...current, baseRevision: updated.draftRevision };
         draftRef.current = rebased;
         setDraft(rebased);
-        setSyncState("device");
-        await writeRecovery({ key: recoveryKey, input: rebased, serverRevision: updated.draftRevision ?? 1, savedAt: new Date().toISOString() });
+        setSyncState(deviceFingerprint.current === fingerprint(rebased) ? "device" : "memory");
       }
     } catch (error) {
+      if (generation !== contextGeneration.current) return;
       if (error instanceof ApiError && error.code === "draft_conflict") {
         setConflict({
           code: "draft_conflict",
@@ -143,19 +164,37 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
         });
         setSyncState("conflict");
       } else {
-        setSyncState("device");
+        setSyncState(draftRef.current && deviceFingerprint.current === fingerprint(draftRef.current) ? "device" : "memory");
         if (error instanceof ApiError) onError(error.message);
       }
+    } finally {
+      saveInFlight.current = false;
     }
-  }, [activityId, detail?.permissions?.canEdit, detail?.status, onError, recoveryKey]);
+  }, [activityId, detail?.permissions?.canEdit, detail?.status, navigate, offeringId, onError, recoveryKey, scope.gradingPeriod, searchParams]);
 
   useEffect(() => {
-    if (!draft || !detail || syncState === "conflict" || fingerprint(draft) === serverFingerprint.current) return;
-    void writeRecovery({ key: recoveryKey, input: draft, serverRevision: draft.baseRevision ?? 1, savedAt: new Date().toISOString() });
-    setSyncState((current) => current === "saving" ? current : "device");
+    if (!draft || !recoveryKey || fingerprint(draft) === serverFingerprint.current) return;
+    let active = true;
+    const localFingerprint = fingerprint(draft);
+    void writeRecovery({ key: recoveryKey, input: draft, serverRevision: draft.baseRevision ?? 1, savedAt: new Date().toISOString() }).then(() => {
+      if (!active) return;
+      deviceFingerprint.current = localFingerprint;
+      setRecoveryError("");
+      if (localFingerprint !== serverFingerprint.current) setSyncState(current => current === "saving" || current === "conflict" ? current : "device");
+    }).catch(() => {
+      if (!active) return;
+      deviceFingerprint.current = "";
+      setRecoveryError("Device recovery is unavailable. Keep this tab open until changes are saved to ATOM.");
+      setSyncState(current => current === "saving" || current === "conflict" || current === "saved" ? current : "memory");
+    });
+    return () => { active = false; };
+  }, [draft, recoveryKey]);
+
+  useEffect(() => {
+    if (!draft || !detail || conflict || fingerprint(draft) === serverFingerprint.current) return;
     const timer = window.setTimeout(() => void saveDraft(draft), 2000);
     return () => window.clearTimeout(timer);
-  }, [detail, draft, recoveryKey, saveDraft, syncState]);
+  }, [detail, draft, conflict, saveDraft]);
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -171,7 +210,14 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
   const editable = detail.status === "draft" && Boolean(detail.permissions?.canEdit);
   const returnHref = `/subjects/${offering.id}/activities/${detail.id}?${searchParams}`;
 
-  const changeDraft = (change: (current: ActivityInput) => ActivityInput) => setDraft((current) => current ? change(current) : current);
+  const changeDraft = (change: (current: ActivityInput) => ActivityInput) => {
+    if (!draftRef.current) return;
+    const next = change(draftRef.current);
+    if (fingerprint(next) === fingerprint(draftRef.current)) return;
+    draftRef.current = next;
+    rememberRecovery({ key: recoveryKey, input: next, serverRevision: next.baseRevision ?? 1, savedAt: new Date().toISOString() });
+    setDraft(next); setSyncState(state => state === "conflict" ? state : "memory");
+  };
   const changeSection = (id: string, change: (section: ActivitySection) => ActivitySection) => changeDraft((current) => ({
     ...current,
     contentDocument: { ...current.contentDocument, sections: current.contentDocument.sections.map((section) => section.id === id ? change(section) : section) },
@@ -189,7 +235,7 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
     ...current,
     contentDocument: {
       ...current.contentDocument,
-      sections: [...current.contentDocument.sections, { id: crypto.randomUUID(), kind: "custom", title: "Additional section", content: emptyRichDocument() }],
+      sections: [...current.contentDocument.sections, { id: newIdentifier(), kind: "custom", title: "Additional section", content: emptyRichDocument() }],
     },
   }));
 
@@ -208,6 +254,7 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
   };
 
   const publish = async (acknowledgeRubricMismatch = false) => {
+    setPublishError("");
     try {
       setBusy(true);
       const updated = requireAvailableActivity(await atomApi.publishActivity(detail.id, scope, detail.draftRevision ?? 1, acknowledgeRubricMismatch));
@@ -215,14 +262,15 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
       setPublishOpen(false);
       navigate(returnHref, { replace: true });
     } catch (error) {
-      onError(error instanceof Error ? error.message : "The activity could not be published");
+      setPublishError(error instanceof Error ? error.message : "The activity could not be published");
     } finally {
       setBusy(false);
     }
   };
 
   const useServer = async () => {
-    await clearRecovery(recoveryKey);
+    try { await clearRecovery(recoveryKey); }
+    catch { setRecoveryError("The device copy could not be cleared. Your current draft is still visible."); return; }
     setConflict(null);
     await load();
   };
@@ -241,8 +289,11 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
         <div className="authoring-header-actions"><SyncBadge state={syncState} /><button className="button mobile-settings-trigger" onClick={() => setSettingsOpen(true)}><Settings2 size={15} />Delivery</button></div>
       </header>
 
+      {recoveryError ? <p className="editor-lock-banner" role="alert">{recoveryError}</p> : null}
+      {syncState === "memory" || syncState === "device" ? <button className="button" onClick={() => void saveDraft(draft)}>Retry saving to ATOM</button> : null}
+
       {detail.status === "published" ? <div className="editor-lock-banner"><AlertTriangle size={18} /><span>This release is published. Unpublish it from the activity view before editing.</span></div> : null}
-      {conflict ? <div className="conflict-banner" role="alert"><div><strong>This draft changed elsewhere.</strong><span>Your device copy is preserved. Choose which version should continue.</span></div><button className="button" onClick={() => void useServer()}>Use server version</button><button className="button button--primary" onClick={() => void replaceServer()}>Replace with my version</button></div> : null}
+      {conflict ? <div className="conflict-banner" role="alert"><div><strong>This draft changed elsewhere.</strong><span>Your changes remain in this tab. Choose which version should continue.</span></div><button className="button" onClick={() => void useServer()}>Use server version</button><button className="button button--primary" onClick={() => void replaceServer()}>Replace with my version</button></div> : null}
 
       <div className="authoring-grid">
         <section className="authoring-canvas">
@@ -264,14 +315,14 @@ export default function ActivityAuthoring({ bootstrap, onError }: { bootstrap: B
               {editable ? <button className="add-section-button" onClick={addCustomSection}><Plus size={17} />Add section</button> : null}
               {draft.blueprint.mode === "progressive" ? <ProgressivePartsEditor blueprint={draft.blueprint} assets={detail.assets} editable={editable && syncState !== "conflict"} editorGeneration={editorGeneration} onChange={(blueprint) => changeDraft((current) => ({ ...current, blueprint }))} /> : null}
             </Tabs.Content>
-            <Tabs.Content value="preview" className="student-preview"><div className="preview-title"><p>{offering.code}</p><h1>{draft.title || "Untitled activity"}</h1><span>{draft.teachingGroupIds.map((id) => offering.groups.find((group) => group.id === id)?.label).filter(Boolean).join(" · ")}</span></div><RichDocumentRenderer document={draft.contentDocument} blueprint={draft.blueprint} /></Tabs.Content>
+            <Tabs.Content value="preview" className="student-preview"><div className="preview-title"><p>{offering.code}</p><h1>{draft.title || "Untitled activity"}</h1><span>{draft.teachingGroupIds.map((id) => detail.targetGroups.find((group) => group.id === id)?.label ?? offering.groups.find((group) => group.id === id)?.label ?? "Unavailable group").join(" · ")}</span></div><RichDocumentRenderer document={draft.contentDocument} blueprint={draft.blueprint} /></Tabs.Content>
           </Tabs.Root>
         </section>
 
         {narrowViewport ? <SettingsSheet open={settingsOpen} onOpenChange={setSettingsOpen}><PublicationRail detail={detail} draft={draft} offering={offering} topics={topics} editable={editable} busy={busy} syncState={syncState} assetInput={assetInput} onDraftChange={changeDraft} onUploadAsset={uploadAsset} onDetailChange={setDetail} onError={onError} onPublish={() => setPublishOpen(true)} /></SettingsSheet> : <PublicationRail detail={detail} draft={draft} offering={offering} topics={topics} editable={editable} busy={busy} syncState={syncState} assetInput={assetInput} onDraftChange={changeDraft} onUploadAsset={uploadAsset} onDetailChange={setDetail} onError={onError} onPublish={() => setPublishOpen(true)} />}
       </div>
 
-      <PublishDialog open={publishOpen} detail={detail} draft={draft} offering={offering} busy={busy} onClose={() => setPublishOpen(false)} onPublish={(acknowledge) => void publish(acknowledge)} />
+      <PublishDialog error={publishError} open={publishOpen} detail={detail} draft={draft} offering={offering} busy={busy} onClose={() => setPublishOpen(false)} onPublish={(acknowledge) => void publish(acknowledge)} />
     </main>
   );
 }
@@ -350,7 +401,7 @@ function ProgressivePartsEditor({ blueprint, assets, editable, editorGeneration,
     onChange({ ...blueprint, parts });
   };
   const addPart = () => onChange({ ...blueprint, parts: [...blueprint.parts, newPart(blueprint.parts.length + 1)] });
-  const duplicatePart = (part: ActivityPart) => onChange({ ...blueprint, parts: [...blueprint.parts, { ...structuredClone(part), id: crypto.randomUUID(), title: `Copy of ${part.title}` }] });
+  const duplicatePart = (part: ActivityPart) => onChange({ ...blueprint, parts: [...blueprint.parts, { ...structuredClone(part), id: newIdentifier(), title: `Copy of ${part.title}` }] });
   return <section className="progressive-authoring"><header className="progressive-authoring__header"><div><span>Progressive activity</span><h2>Parts and levels</h2><p>The shared introduction above is followed by these ordered parts.</p></div>{editable ? <button className="button button--primary" onClick={addPart}><Plus size={16} />Add part</button> : null}</header>{blueprint.parts.length ? <nav className="part-navigator" aria-label="Activity parts">{blueprint.parts.map((part) => <a href={`#author-part-${part.id}`} key={part.id}>{part.shortLabel}</a>)}</nav> : null}<div className="part-stack">{blueprint.parts.map((part, partIndex) => <details className="author-part" id={`author-part-${part.id}`} open key={part.id}><summary><span>{part.shortLabel}</span><strong>{part.title}</strong></summary><div className="author-part__settings"><label><span>Short label</span><input disabled={!editable} value={part.shortLabel} onChange={(event) => updatePart(part.id, (current) => ({ ...current, shortLabel: event.target.value }))} /></label><label><span>Part title</span><input disabled={!editable} value={part.title} onChange={(event) => updatePart(part.id, (current) => ({ ...current, title: event.target.value }))} /></label>{editable ? <div className="author-part__actions"><button className="button button--small" disabled={partIndex === 0} onClick={() => movePart(part.id, -1)}>Move up</button><button className="button button--small" disabled={partIndex === blueprint.parts.length - 1} onClick={() => movePart(part.id, 1)}>Move down</button><button className="button button--small" onClick={() => duplicatePart(part)}>Duplicate</button><button className="button button--small button--danger" disabled={blueprint.parts.length <= 2} onClick={() => onChange({ ...blueprint, parts: blueprint.parts.filter((item) => item.id !== part.id) })}>Remove</button></div> : null}</div>{part.contentDocument.sections.map((section, sectionIndex) => <RichSectionEditor key={`${part.id}:${section.id}:${editorGeneration}`} section={section} assets={assets} editable={editable} canMoveUp={sectionIndex > 0} canMoveDown={sectionIndex < part.contentDocument.sections.length - 1} onChange={(content) => updatePart(part.id, (current) => ({ ...current, contentDocument: { ...current.contentDocument, sections: current.contentDocument.sections.map((item) => item.id === section.id ? { ...item, content } : item) } }))} onTitleChange={(title) => updatePart(part.id, (current) => ({ ...current, contentDocument: { ...current.contentDocument, sections: current.contentDocument.sections.map((item) => item.id === section.id ? { ...item, title } : item) } }))} onMove={(direction) => updatePart(part.id, (current) => { const sections = [...current.contentDocument.sections]; const index = sections.findIndex((item) => item.id === section.id); const target = index + direction; if (target < 0 || target >= sections.length) return current; [sections[index], sections[target]] = [sections[target], sections[index]]; return { ...current, contentDocument: { ...current.contentDocument, sections } }; })} onRemove={() => updatePart(part.id, (current) => ({ ...current, contentDocument: { ...current.contentDocument, sections: current.contentDocument.sections.filter((item) => item.id !== section.id) } }))} />)}</details>)}</div>{!blueprint.parts.length ? <button className="add-section-button" disabled={!editable} onClick={addPart}><Plus size={17} />Add the first part</button> : null}</section>;
 }
 
@@ -361,7 +412,7 @@ function changeBlueprintMode(blueprint: ActivityBlueprintV1, mode: ActivityBluep
 }
 
 function newPart(number: number): ActivityPart {
-  return { id: crypto.randomUUID(), shortLabel: `Level ${number}`, title: `Level ${number}`, contentDocument: { version: 1, sections: [{ id: crypto.randomUUID(), kind: "requirements", title: "Requirements", content: emptyRichDocument() }] } };
+  return { id: newIdentifier(), shortLabel: `Level ${number}`, title: `Level ${number}`, contentDocument: { version: 1, sections: [{ id: newIdentifier(), kind: "requirements", title: "Requirements", content: emptyRichDocument() }] } };
 }
 
 function SettingsSheet({ open, onOpenChange, children }: { open: boolean; onOpenChange: (open: boolean) => void; children: React.ReactNode }) {
@@ -390,17 +441,17 @@ function RailSection({ title, children, action, icon }: { title: string; childre
 }
 
 function SyncBadge({ state }: { state: SyncState }) {
-  const copy = state === "saved" ? "Saved to ATOM" : state === "saving" ? "Saving…" : state === "conflict" ? "Needs attention" : "Saved on this device";
-  return <span className={`sync-badge sync-badge--${state}`}>{state === "conflict" ? <AlertTriangle size={14} /> : <Check size={14} />}{copy}</span>;
+  const copy = state === "saved" ? "Saved to ATOM" : state === "saving" ? "Saving…" : state === "conflict" ? "Needs attention" : state === "device" ? "Saved on this device" : "Not saved — keep this tab open";
+  return <span className={`sync-badge sync-badge--${state}`}>{state === "conflict" || state === "memory" ? <AlertTriangle size={14} /> : <Check size={14} />}{copy}</span>;
 }
 
-function PublishDialog({ open, detail, draft, offering, busy, onClose, onPublish }: { open: boolean; detail: ActivityAvailableDetail; draft: ActivityInput; offering: SubjectOffering; busy: boolean; onClose: () => void; onPublish: (acknowledge: boolean) => void }) {
+function PublishDialog({ open, detail, draft, offering, busy, onClose, onPublish, error }: { error: string; open: boolean; detail: ActivityAvailableDetail; draft: ActivityInput; offering: SubjectOffering; busy: boolean; onClose: () => void; onPublish: (acknowledge: boolean) => void }) {
   const [acknowledge, setAcknowledge] = useState(false);
   const rubric = draft.blueprint.rubric;
   const total = rubric?.criteria.reduce((sum, item) => sum + item.points, 0) ?? 0;
   const mismatch = Boolean(rubric && Math.abs(total - rubric.expectedPoints) > 0.001);
   useEffect(() => { if (open) setAcknowledge(false); }, [open]);
-  return <Dialog.Root open={open} onOpenChange={(value) => { if (!value) onClose(); }}><Dialog.Portal><Dialog.Overlay className="modal-backdrop" /><Dialog.Content className="modal publish-dialog"><header className="modal__header"><div><Dialog.Title>Publish Release {(detail.releaseVersion ?? 0) + 1}?</Dialog.Title><Dialog.Description>Students in the selected groups will receive this immutable activity release.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={19} /></button></Dialog.Close></header><dl className="publish-review"><div><dt>Activity</dt><dd>{draft.title}</dd></div><div><dt>Structure</dt><dd>{draft.blueprint.mode === "progressive" ? `${draft.blueprint.parts.length}-part ${draft.blueprint.progression}` : "Simple"}</dd></div><div><dt>Period</dt><dd>{draft.gradingPeriod === "midterm" ? "Midterm" : "Final Term"}</dd></div><div><dt>Groups</dt><dd>{draft.teachingGroupIds.map((id) => offering.groups.find((group) => group.id === id)?.label).filter(Boolean).join(" · ")}</dd></div><div><dt>Submission files</dt><dd>{draft.acceptedExtensions.join(" or ")} · {formatBytes(draft.maxBytes)} · {draft.blueprint.submission.validationMode}</dd></div><div><dt>Rubric</dt><dd>{rubric ? `${total} / ${rubric.expectedPoints} points · ${rubric.visibleToStudents ? "student visible" : "faculty only"}` : "None"}</dd></div><div><dt>Teaching files</dt><dd>{detail.assets.length}</dd></div></dl>{mismatch ? <label className="publish-warning"><input type="checkbox" checked={acknowledge} onChange={(event) => setAcknowledge(event.target.checked)} /><span><strong>Rubric total mismatch</strong> Criteria total {total}, but the configured maximum is {rubric?.expectedPoints}. Publish anyway.</span></label> : null}<footer className="modal__actions"><Dialog.Close asChild><button className="button">Cancel</button></Dialog.Close><button className="button button--primary" disabled={busy || (mismatch && !acknowledge)} onClick={() => onPublish(acknowledge)}>{busy ? "Publishing…" : "Publish release"}</button></footer></Dialog.Content></Dialog.Portal></Dialog.Root>;
+  return <Dialog.Root open={open} onOpenChange={(value) => { if (!value) onClose(); }}><Dialog.Portal><Dialog.Overlay className="modal-backdrop" /><Dialog.Content className="modal publish-dialog"><header className="modal__header"><div><Dialog.Title>Publish Release {(detail.releaseVersion ?? 0) + 1}?</Dialog.Title><Dialog.Description>Students in the selected groups will receive this immutable activity release.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={19} /></button></Dialog.Close></header><dl className="publish-review"><div><dt>Activity</dt><dd>{draft.title}</dd></div><div><dt>Structure</dt><dd>{draft.blueprint.mode === "progressive" ? `${draft.blueprint.parts.length}-part ${draft.blueprint.progression}` : "Simple"}</dd></div><div><dt>Period</dt><dd>{draft.gradingPeriod === "midterm" ? "Midterm" : "Final Term"}</dd></div><div><dt>Groups</dt><dd>{draft.teachingGroupIds.map((id) => detail.targetGroups.find((group) => group.id === id)?.label ?? offering.groups.find((group) => group.id === id)?.label ?? "Unavailable group").join(" · ")}</dd></div><div><dt>Submission files</dt><dd>{draft.acceptedExtensions.join(" or ")} · {formatBytes(draft.maxBytes)} · {draft.blueprint.submission.validationMode}</dd></div><div><dt>Rubric</dt><dd>{rubric ? `${total} / ${rubric.expectedPoints} points · ${rubric.visibleToStudents ? "student visible" : "faculty only"}` : "None"}</dd></div><div><dt>Teaching files</dt><dd>{detail.assets.length}</dd></div></dl>{error ? <p role="alert" className="publish-warning">{error}</p> : null}{mismatch ? <label className="publish-warning"><input type="checkbox" checked={acknowledge} onChange={(event) => setAcknowledge(event.target.checked)} /><span><strong>Rubric total mismatch</strong> Criteria total {total}, but the configured maximum is {rubric?.expectedPoints}. Publish anyway.</span></label> : null}<footer className="modal__actions"><Dialog.Close asChild><button className="button">Cancel</button></Dialog.Close><button className="button button--primary" disabled={busy || (mismatch && !acknowledge)} onClick={() => onPublish(acknowledge)}>{busy ? "Publishing…" : "Publish release"}</button></footer></Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
 
 function SelectItem({ value, children }: { value: string; children: string }) { return <Select.Item className="select-item" value={value}><Select.ItemIndicator><Check size={13} /></Select.ItemIndicator><Select.ItemText>{children}</Select.ItemText></Select.Item>; }
@@ -413,9 +464,9 @@ function newActivityInput(offering: SubjectOffering, groupId: string, period: Gr
 
 function defaultDocument(): ActivityDocumentV1 {
   return { version: 1, sections: [
-    { id: crypto.randomUUID(), kind: "overview", title: "Activity overview", content: emptyRichDocument() },
-    { id: crypto.randomUUID(), kind: "requirements", title: "Requirements", content: emptyRichDocument() },
-    { id: crypto.randomUUID(), kind: "submission_notes", title: "Submission notes", content: emptyRichDocument() },
+    { id: newIdentifier(), kind: "overview", title: "Activity overview", content: emptyRichDocument() },
+    { id: newIdentifier(), kind: "requirements", title: "Requirements", content: emptyRichDocument() },
+    { id: newIdentifier(), kind: "submission_notes", title: "Submission notes", content: emptyRichDocument() },
   ] };
 }
 

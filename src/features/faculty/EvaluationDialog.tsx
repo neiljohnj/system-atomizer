@@ -18,10 +18,13 @@ export function EvaluationDialog({ submission, busy, onCancel, onSubmit }: Evalu
   const [manualDeduction, setManualDeduction] = useState(String(submission.evaluation?.manualDeduction ?? 0));
   const [comments, setComments] = useState(submission.evaluation?.comments ?? "");
   const [annotations, setAnnotations] = useState(submission.evaluation?.annotations ?? "");
+  const [error, setError] = useState("");
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    await onSubmit({ score: Number(score), manualDeduction: Number(manualDeduction), comments, annotations });
+    setError("");
+    try { await onSubmit({ score: Number(score), manualDeduction: Number(manualDeduction), comments, annotations }); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "The evaluation could not be recorded"); }
   };
 
   const close = () => {
@@ -45,6 +48,7 @@ export function EvaluationDialog({ submission, busy, onCancel, onSubmit }: Evalu
             <Dialog.Close asChild><button className="icon-button" type="button" aria-label="Close"><X size={20} /></button></Dialog.Close>
           </header>
           <form className="form-stack" onSubmit={(event) => void submit(event)}>
+            {error ? <p role="alert" className="publish-warning">{error}</p> : null}
             <div className="form-grid">
               <label><span>Total score</span><input type="number" min="0" step="0.01" required value={score} onChange={(event) => setScore(event.target.value)} /></label>
               <label><span>Manual deduction</span><input type="number" min="0" step="0.01" required value={manualDeduction} onChange={(event) => setManualDeduction(event.target.value)} /></label>

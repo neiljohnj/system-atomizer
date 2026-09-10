@@ -1,13 +1,18 @@
 import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import { storageRoot } from "./storage-root.js";
 import { validateActivityDocument } from "./activity-content.js";
 import { validateActivityBlueprint } from "./activity-blueprint.js";
 import { AUTHORING_STRESS_FIXTURES } from "./authoring-fixtures.js";
 import { FACULTY_ID, LAB_2AX_ID, LAB_2A_ID, LEGACY_SUBJECT_ID, SUBJECT_OFFERING_ID, openAtomDatabase } from "./db.js";
 
 const refresh = process.argv.includes("--refresh");
-const { db, dataDir } = openAtomDatabase(process.cwd());
+if (!process.argv.includes("--development-fixture")) throw new Error("Stress seeding requires --development-fixture and an explicit disposable ATOM_ROOT.");
+if (!process.env.ATOM_ROOT?.trim()) throw new Error("Set ATOM_ROOT to the development fixture root before seeding.");
+const { db, dataDir } = openAtomDatabase(storageRoot());
+const fixtureDir = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "../fixtures/authoring/" : "../server/fixtures/authoring/", import.meta.url));
 const now = new Date().toISOString();
 const topicId = "topic-authoring-stress-tests";
 
@@ -55,7 +60,7 @@ if (commandRow?.status === "draft" && commandRow.draft_revision === 1 && !comman
     const assetId = `stress-command-starter-level-${level}`;
     if (db.prepare("SELECT 1 FROM activity_assets WHERE id = ?").get(assetId)) continue;
     const filename = `command-resource-level${level}.py`;
-    const source = join(process.cwd(), "server", "fixtures", "authoring", filename);
+    const source = join(fixtureDir, filename);
     const stored = join(dataDir, "uploads", "activity-assets", "stress-command-resource-processor", assetId, filename);
     mkdirSync(dirname(stored), { recursive: true });
     copyFileSync(source, stored);

@@ -79,6 +79,7 @@ export interface StudentSubmissionState {
 }
 
 export interface ActivitySummary {
+  evidenceOnly?: boolean;
   id: string;
   subjectOfferingId: string;
   gradingPeriod: GradingPeriod;

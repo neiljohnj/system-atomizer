@@ -1,3 +1,4 @@
+import { newIdentifier } from "../../identifier";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { CalendarClock, Check, Download, FileArchive, FileCode2, Info, Upload, X } from "lucide-react";
 import { atomApi } from "../../api";
@@ -63,7 +64,7 @@ export function StudentWorkspace({
       onError(`This activity accepts ${detail?.acceptedExtensions.join(" or ") ?? "the configured file types"}`);
       return;
     }
-    setPending({ file, idempotencyKey: crypto.randomUUID() });
+    setPending({ file, idempotencyKey: newIdentifier() });
   };
 
   const drop = (event: DragEvent<HTMLDivElement>) => {

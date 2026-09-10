@@ -44,7 +44,7 @@ export class AuthService {
 
   constructor(
     private readonly db: DatabaseSync,
-    private readonly options: { developmentPreviewEnabled: boolean; secureCookies: boolean },
+    private readonly options: { developmentPreviewEnabled: boolean; secureCookies: boolean; behindProxy?: boolean },
   ) {}
 
   setupStatus(): { setupRequired: boolean; httpWarning: boolean } {
@@ -288,6 +288,7 @@ export class AuthService {
   }
 
   private requireLoopback(request: Request): void {
+    if (this.options.behindProxy) throw new HttpError(403, "Web maintenance is disabled while ATOM is configured behind a proxy. Use the host-only maintenance procedure.");
     const address = request.socket.remoteAddress ?? "";
     if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(address)) {
       throw new HttpError(403, "This maintenance action is available only on the ATOM host computer");
