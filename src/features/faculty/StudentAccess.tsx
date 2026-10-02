@@ -1,65 +1,24 @@
-import * as Dialog from "@radix-ui/react-dialog";
-import { KeyRound, ShieldCheck, UsersRound, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { KeyRound, UsersRound } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { atomApi } from "../../api";
 import type { ManagedStudent, SubjectOffering } from "../../types";
+import { CredentialHandoff } from "../setup/CredentialHandoff";
 
 export function StudentAccess({ offering, onError }: { offering: SubjectOffering; onError: (message: string) => void }) {
-  const [students, setStudents] = useState<ManagedStudent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [target, setTarget] = useState<ManagedStudent | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const load = async () => {
-    try {
-      setLoading(true);
-      setStudents(await atomApi.managedStudents(offering.id));
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "Student accounts could not be loaded");
-    } finally {
-      setLoading(false);
-    }
+  const [students,setStudents]=useState<ManagedStudent[]>([]),[loading,setLoading]=useState(true);
+  const [target,setTarget]=useState<ManagedStudent|null>(null);
+  const alive=useRef(true);
+  const load=async()=>{
+    try {setLoading(true);const rows=await atomApi.managedStudents(offering.id);if(alive.current)setStudents(rows);}
+    catch(error){if(alive.current)onError((error as Error).message);}
+    finally{if(alive.current)setLoading(false);}
   };
-
-  useEffect(() => { void load(); }, [offering.id]);
-
-  const reset = async () => {
-    if (!target) return;
-    try {
-      setBusy(true);
-      await atomApi.resetStudentPassword(offering.id, target.id);
-      setTarget(null);
-      await load();
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "The password could not be reset");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <section className="student-access-page">
-      <header className="page-heading"><div><p>Account access</p><h1>Students in your teaching groups</h1><span>Password resets revoke active sessions and require a password change at the next sign-in.</span></div><UsersRound size={32} /></header>
-      {loading ? <div className="loading-panel">Loading student accounts…</div> : (
-        <div className="activity-table-wrap"><table className="data-table student-access-table">
-          <thead><tr><th>Student</th><th>Your shared groups</th><th>Password state</th><th>Action</th></tr></thead>
-          <tbody>{students.map((student) => <tr key={student.id}>
-            <td><strong>{student.studentNumber}</strong><small>{student.displayName}</small></td>
-            <td>{student.groups.map((group) => group.label).join(" · ")}</td>
-            <td>{student.mustChangePassword ? <span className="status status--draft">Change required</span> : <span className="status status--published"><ShieldCheck size={13} />Ready</span>}</td>
-            <td><button className="button button--small" onClick={() => setTarget(student)}><KeyRound size={14} />Reset password</button></td>
-          </tr>)}</tbody>
-        </table></div>
-      )}
-      {!loading && !students.length ? <div className="empty-state"><UsersRound size={32} /><h2>No students in your assigned groups</h2></div> : null}
-
-      <Dialog.Root open={Boolean(target)} onOpenChange={(open) => { if (!open) setTarget(null); }}>
-        <Dialog.Portal><Dialog.Overlay className="modal-backdrop" /><Dialog.Content className="modal modal--small">
-          <header className="modal__header"><div><Dialog.Title>Reset student password?</Dialog.Title><Dialog.Description>{target?.studentNumber} · {target?.displayName}</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={19} /></button></Dialog.Close></header>
-          <p>The password returns to the student number. Any active sessions are revoked, and the student must choose a new password before entering ATOM again.</p>
-          <footer className="modal__actions"><Dialog.Close asChild><button className="button">Cancel</button></Dialog.Close><button className="button button--primary" disabled={busy} onClick={() => void reset()}>{busy ? "Resetting…" : "Reset password"}</button></footer>
-        </Dialog.Content></Dialog.Portal>
-      </Dialog.Root>
-    </section>
-  );
+  useEffect(()=>{alive.current=true;void load();return()=>{alive.current=false;};},[offering.id]);
+  return <section className="student-access-page">
+    <header className="page-heading"><div><p>Account access</p><h1>Students in your teaching groups</h1><span>Credential reissue revokes sessions and requires a new password after single-use activation.</span></div><UsersRound size={32}/></header>
+    {offering.configurationLocked?<p className="setup-lock">Instructional membership is permanently locked after first publication. Credential recovery remains available; it does not change placements.</p>:null}
+    {loading?<div className="loading-panel">Loading student accounts…</div>:<div className="activity-table-wrap"><table className="data-table student-access-table"><thead><tr><th>Student</th><th>Your shared groups</th><th>Account state</th><th>Action</th></tr></thead><tbody>{students.map(student=><tr key={student.id}><td><strong>{student.studentNumber}</strong><small>{student.displayName}</small></td><td>{student.groups.map(g=>g.label).join(" · ")}</td><td>{student.activationState.replaceAll("_"," ")}</td><td><button className="button button--small" onClick={()=>setTarget(student)}><KeyRound size={14}/>Private credential hand-off</button></td></tr>)}</tbody></table></div>}
+    {!loading&&!students.length?<div className="empty-state"><h2>No students in your assigned groups</h2></div>:null}
+    {target?<CredentialHandoff key={target.id} name={`${target.studentNumber} · ${target.displayName}`} onClose={()=>setTarget(null)} onIssued={()=>void load()} issue={()=>atomApi.resetStudentPassword(offering.id,target.id)}/>:null}
+  </section>;
 }

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { atomApi } from "./api";
 import { AppHeader } from "./components/AppHeader";
@@ -6,8 +6,10 @@ import { ChangePasswordPage, LoginPage, RecoveryPage, SetupPage } from "./featur
 import { SubjectHome } from "./features/subjects/SubjectHome";
 import { SubjectWorkspace } from "./features/subjects/SubjectWorkspace";
 import type { AuthSessionPayload, BootstrapPayload } from "./types";
+import { OwnerBootstrap } from "./features/setup/OwnerBootstrap";
 
 const ActivityAuthoring = lazy(() => import("./features/authoring/ActivityAuthoring"));
+const CourseSetup = lazy(() => import("./features/setup/CourseSetup"));
 
 export default function App() {
   const location = useLocation();
@@ -19,10 +21,12 @@ export default function App() {
   const [unsyncedDraft, setUnsyncedDraft] = useState(false);
   const [deviceSaved, setDeviceSaved] = useState(false);
   const [loggedOutDestination, setLoggedOutDestination] = useState("/login");
+  const accountEpoch = useRef(0);
 
   const loadBootstrap = useCallback(async () => {
+    const epoch = accountEpoch.current;
     const payload = await atomApi.bootstrap();
-    setBootstrap(payload);
+    if (epoch === accountEpoch.current) setBootstrap(payload);
     return payload;
   }, []);
 
@@ -42,6 +46,7 @@ export default function App() {
   useEffect(() => { void loadSession(); }, [loadSession]);
   useEffect(() => {
     const expired = () => {
+      accountEpoch.current += 1;
       setSession((current) => ({ authenticated: false, setupRequired: false, httpWarning: current?.httpWarning ?? true }));
       setBootstrap(null);
       const returnTo = `${window.location.pathname}${window.location.search}`;
@@ -62,6 +67,8 @@ export default function App() {
   }, [navigate]);
 
   const authenticated = async (nextSession: AuthSessionPayload, returnTo?: string) => {
+    accountEpoch.current += 1;
+    setBootstrap(null);
     setSession(nextSession);
     if (nextSession.mustChangePassword) {
       navigate("/change-password", { replace: true });
@@ -76,6 +83,7 @@ export default function App() {
       ? "The latest draft is saved on this device but not to ATOM. Sign out?"
       : "The latest changes are not confirmed saved. Signing out may lose them. Sign out?")) return;
     const returnTo = switching ? `${location.pathname}${location.search}` : undefined;
+    accountEpoch.current += 1;
     try { await atomApi.logout(); } catch { /* The local UI still clears an expired session. */ }
     const destination = switching
       ? `/login?mode=switch&returnTo=${encodeURIComponent(returnTo ?? "/subjects")}`
@@ -87,6 +95,8 @@ export default function App() {
   };
 
   const changePreviewIdentity = async (userId: string) => {
+    accountEpoch.current += 1;
+    setBootstrap(null);
     try {
       setLoading(true);
       const nextSession = await atomApi.assumeIdentity(userId);
@@ -131,7 +141,9 @@ export default function App() {
       <Suspense fallback={<div className="app-loading">Opening workspace…</div>}>
         <Routes>
           <Route path="/change-password" element={<ChangePasswordPage forced={false} onChanged={(value) => void authenticated({ ...session, ...value, authenticated: true })} onSignOut={() => void signOut()} />} />
-          <Route path="/subjects" element={<SubjectHome academicTerms={bootstrap.academicTerms} role={bootstrap.currentUser.role} />} />
+          <Route path="/subjects" element={<SubjectHome academicTerms={bootstrap.academicTerms} role={bootstrap.currentUser.role} canSetup={bootstrap.setup.canSetup} />} />
+          <Route path="/course-setup/:offeringId?" element={<CourseSetup key={bootstrap.currentUser.id} bootstrap={bootstrap} onRefresh={loadBootstrap} />} />
+          <Route path="/local-owner" element={<OwnerBootstrap user={bootstrap.currentUser} onRefresh={loadBootstrap} />} />
           <Route path="/subjects/:offeringId/activities/new" element={bootstrap.currentUser.role === "faculty" ? <ActivityAuthoring key={`${bootstrap.currentUser.id}:${location.pathname}:${location.search}`} bootstrap={bootstrap} onError={setError} /> : <Navigate to="/subjects" replace />} />
           <Route path="/subjects/:offeringId/activities/:activityId/edit" element={bootstrap.currentUser.role === "faculty" ? <ActivityAuthoring key={`${bootstrap.currentUser.id}:${location.pathname}:${location.search}`} bootstrap={bootstrap} onError={setError} /> : <Navigate to="/subjects" replace />} />
           <Route path="/subjects/:offeringId/activities" element={<SubjectWorkspace bootstrap={bootstrap} module="activities" onError={setError} />} />

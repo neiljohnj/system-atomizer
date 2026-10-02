@@ -27,6 +27,9 @@ import { storageRoot as resolveStorageRoot } from "./storage-root.js";
 import { seedDemoAccounts } from "./demo-accounts.js";
 import { HttpError } from "./errors.js";
 import { InstructorAuthority } from "./instructor-authority.js";
+import { AcademicSetup } from "./academic-setup.js";
+import { academicRoutes } from "./academic-routes.js";
+import { activationState } from "./account-activation.js";
 import { configuredAllowedOrigins, isAllowedMutationOrigin } from "./request-security.js";
 import {
   cleanOriginalFilename,
@@ -73,7 +76,7 @@ const storageRoot = resolveStorageRoot();
 const developmentPreviewEnabled = process.env.ATOM_DEVELOPMENT_PREVIEW === "true";
 const secureCookies = process.env.ATOM_HTTPS === "true";
 const allowedOrigins = configuredAllowedOrigins(process.env.ATOM_ALLOWED_ORIGINS);
-const { db, dataDir } = openAtomDatabase(storageRoot);
+const { db, dataDir } = openAtomDatabase(storageRoot, { sample: process.argv.includes("--sample-data") || process.argv.includes("--demo-accounts") });
 const demoAccountsEnabled = process.argv.includes("--demo-accounts");
 if (demoAccountsEnabled) seedDemoAccounts(db);
 const uploadsDir = join(dataDir, "uploads");
@@ -84,6 +87,7 @@ await mkdir(tempDir, { recursive: true });
 await mkdir(assetsDir, { recursive: true });
 const auth = new AuthService(db, { developmentPreviewEnabled, secureCookies, behindProxy: process.env.ATOM_BEHIND_PROXY === "true" });
 const instructorAuthority = new InstructorAuthority(db);
+const academicSetup = new AcademicSetup(db);
 
 const upload = multer({
   dest: tempDir,
@@ -136,6 +140,13 @@ app.get("/api/health", (_request, response) => {
     transportSecurity: secureCookies ? "https" : "http_warning",
     serverTime: new Date().toISOString(),
   });
+});
+
+app.use("/api/academic-setup", academicRoutes(db,auth,academicSetup));
+app.post("/api/local-recovery/owner",(request,response)=>{
+  auth.bootstrapOwner(request,request.body?.confirmUserId);
+  response.setHeader("cache-control","no-store");
+  response.status(204).end();
 });
 
 app.get("/api/auth/session", (request, response) => {
@@ -205,6 +216,7 @@ app.get("/api/bootstrap", (request, response) => {
   response.setHeader("cache-control", "no-store");
   response.json({
     currentUser: user,
+    setup: academicSetup.capabilities(user),
     academicTerms: listAcademicTerms(user),
     moduleAvailability: {
       activities: true,
@@ -401,8 +413,8 @@ app.post("/api/subject-offerings/:offeringId/students/:studentId/reset-password"
   if (!facultySharesStudentGroup(user.id, offeringId, studentId)) {
     throw new HttpError(403, "You may reset only students in your assigned teaching groups");
   }
-  auth.resetStudent(request, user, studentId);
-  response.status(204).end();
+  response.setHeader("cache-control","no-store");
+  response.json(auth.resetStudent(request, user, studentId));
 });
 
 app.post("/api/activities", (request, response) => {
@@ -598,6 +610,7 @@ app.post("/api/activities/:activityId/publish", (request, response) => {
 
   db.exec("BEGIN IMMEDIATE");
   try {
+    academicSetup.assertPublishReady(String(activity.subject_offering_id));
     db.prepare(`
       INSERT INTO activity_releases (id, activity_id, version, snapshot_json, published_at, published_by)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -1234,13 +1247,13 @@ function listAcademicTerms(user: AuthUser): Record<string, unknown>[] {
     FROM subject_offerings so
     JOIN academic_terms t ON t.id = so.academic_term_id
     ${user.role === "faculty"
-      ? `JOIN teaching_groups tg ON tg.subject_offering_id = so.id
-         JOIN faculty_group_assignments fga ON fga.teaching_group_id = tg.id
-         WHERE fga.faculty_id = ?`
+      ? `WHERE EXISTS(SELECT 1 FROM teaching_groups tg JOIN faculty_group_assignments fga ON fga.teaching_group_id=tg.id WHERE tg.subject_offering_id=so.id AND fga.faculty_id=?)
+          OR EXISTS(SELECT 1 FROM offering_setup_managers m WHERE m.offering_id=so.id AND m.user_id=?)
+          OR EXISTS(SELECT 1 FROM installation_owners o WHERE o.user_id=?)`
       : `JOIN enrollments e ON e.subject_offering_id = so.id
          WHERE e.student_id = ? AND e.status = 'active'`}
     ORDER BY t.label DESC, so.subject_code
-  `).all(user.id) as Row[];
+  `).all(...(user.role === "faculty" ? [user.id,user.id,user.id] : [user.id])) as Row[];
 
   const terms = new Map<string, { id: string; label: string; offerings: Record<string, unknown>[] }>();
   for (const offering of offerings) {
@@ -1255,6 +1268,10 @@ function listAcademicTerms(user: AuthUser): Record<string, unknown>[] {
       code: String(offering.subject_code),
       title: String(offering.subject_title),
       groups: listAuthorizedGroups(user, String(offering.id)),
+      canSetup: academicSetup.canManage(user,String(offering.id)),
+      setupOnly: user.role === "faculty" && !facultyAssignedToOffering(user.id,String(offering.id)),
+      setupState: offering.setup_state,
+      configurationLocked: Boolean(offering.configuration_locked_at),
     });
     terms.set(termId, term);
   }
@@ -2085,6 +2102,7 @@ function listManagedStudents(facultyId: string, offeringId: string): Record<stri
       studentNumber: row.student_number ? String(row.student_number) : null,
       displayName: String(row.display_name),
       mustChangePassword: Number(row.must_change_password ?? 0) === 1,
+      activationState: activationState(db,id),
       groups: [],
     };
     (student.groups as Array<Record<string, string>>).push({ id: String(row.group_id), label: String(row.group_label) });

@@ -33,6 +33,10 @@ export interface SubjectOffering {
   code: string;
   title: string;
   groups: TeachingGroup[];
+  canSetup?: boolean;
+  setupOnly?: boolean;
+  setupState?: string;
+  configurationLocked?: boolean;
 }
 
 export interface AcademicTerm {
@@ -235,6 +239,7 @@ export interface ManagedStudent {
   studentNumber: string | null;
   displayName: string;
   mustChangePassword: boolean;
+  activationState: string;
   groups: Array<{ id: string; label: string }>;
 }
 
@@ -295,6 +300,7 @@ export interface PreviewIdentities {
 }
 
 export interface BootstrapPayload {
+  setup: { owner: boolean; canSetup: boolean; offeringIds: string[] };
   currentUser: User;
   academicTerms: AcademicTerm[];
   moduleAvailability: ModuleAvailability;

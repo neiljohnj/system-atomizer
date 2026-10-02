@@ -3,7 +3,7 @@ import { openAtomDatabase } from "./db.js";
 import { seedDemoAccounts } from "./demo-accounts.js";
 
 const storageRoot = resolveStorageRoot();
-const database = openAtomDatabase(storageRoot);
+const database = openAtomDatabase(storageRoot, { sample: true });
 
 try {
   const accounts = seedDemoAccounts(database.db);

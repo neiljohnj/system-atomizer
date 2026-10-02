@@ -5,7 +5,7 @@ import {
   GraduationCap, Home, UsersRound,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, NavLink, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, NavLink, Navigate, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { atomApi } from "../../api";
 import type {
   ActivityScope, ActivitySummary, AssessmentStreamResponse, BootstrapPayload,
@@ -37,12 +37,14 @@ export function SubjectWorkspace({ bootstrap, module, onError }: SubjectWorkspac
     [bootstrap.academicTerms, offeringId],
   );
   if (!offering) return <Navigate to="/subjects" replace />;
-  return <AuthorizedSubjectWorkspace bootstrap={bootstrap} offering={offering} module={module} routeActivityId={activityId} onError={onError} />;
+  if (offering.setupOnly) return <main className="course-setup"><Link to="/subjects">← All subjects</Link><h1>{offering.code} · Activities</h1><p>{offering.title} · {offering.setupState} configuration</p><p>You manage this offering's setup. Assigned instructors author, publish and review student evidence in their teaching groups. Setup authority does not grant those permissions.</p><Link className="button button--primary" to={`/course-setup/${offering.id}?step=3&returnTo=${encodeURIComponent(`/subjects/${offering.id}/activities`)}`}>Review course setup</Link></main>;
+  return <AuthorizedSubjectWorkspace key={`${bootstrap.currentUser.id}:${offering.id}`} bootstrap={bootstrap} offering={offering} module={module} routeActivityId={activityId} onError={onError} />;
 }
 
 function AuthorizedSubjectWorkspace({ bootstrap, offering, module, routeActivityId, onError }: SubjectWorkspaceProps & { offering: SubjectOffering; routeActivityId?: string }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [stream, setStream] = useState<AssessmentStreamResponse>(EMPTY_STREAM);
   const [activities, setActivities] = useState<ActivitySummary[]>([]);
   const [loading, setLoading] = useState(module === "activities" || module === "submissions");
@@ -99,6 +101,7 @@ function AuthorizedSubjectWorkspace({ bootstrap, offering, module, routeActivity
   return <main className="subject-workspace">
     <header className="subject-context">
       <Link className="all-subjects-link" to="/subjects"><Home size={15} />All subjects</Link>
+      {offering.canSetup ? <Link className="button button--small" to={`/course-setup/${offering.id}?returnTo=${encodeURIComponent(location.pathname+location.search)}`}>Course setup</Link> : null}
       <div className="subject-identity"><strong>{offering.code}</strong><span>{offering.title}</span></div>
       {module !== "students" ? <div className="workspace-filter"><label id="group-filter-label">Teaching group</label><GroupSelect groups={offering.groups} value={groupId} allLabel={user.role === "faculty" ? "All assigned groups" : "All my groups"} onChange={(value) => changeScope("group", value)} /></div> : <div />}
       {module !== "students" ? <Tabs.Root className="period-tabs" value={gradingPeriod} onValueChange={(value) => changeScope("period", value)}><Tabs.List aria-label="Grading period"><Tabs.Trigger value="midterm">Midterm</Tabs.Trigger><Tabs.Trigger value="final_term">Final Term</Tabs.Trigger></Tabs.List></Tabs.Root> : <div />}

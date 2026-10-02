@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import type { DatabaseSync } from "node:sqlite";
-import { FACULTY_ID } from "./db.js";
+import { issueActivation, transaction } from "./account-activation.js";
 import { HttpError } from "./errors.js";
 import {
   createPasswordRecord,
@@ -74,6 +74,10 @@ export class AuthService {
       this.db.prepare("UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?").run(new Date(now).toISOString(), tokenHash);
     }
     const mustChangePassword = Number(row.must_change_password ?? 0) === 1 && Number(row.development_preview ?? 0) !== 1;
+    const activation = this.db.prepare("SELECT * FROM managed_accounts WHERE user_id=?").get(String(row.user_id));
+    if (activation && !activation.activated_at && (!activation.activation_expires_at || Date.parse(String(activation.activation_expires_at)) <= now)) {
+      throw new HttpError(401, "Activation expired. Ask your operator to reissue access.", "activation_expired");
+    }
     if (mustChangePassword && !options.allowPasswordChange) {
       throw new HttpError(403, "Change your temporary password before continuing", "password_change_required");
     }
@@ -118,7 +122,17 @@ export class AuthService {
       throw new HttpError(401, "Username, student number, or password is incorrect", "invalid_credentials");
     }
     this.attempts.delete(attemptKey);
-    return this.issueSession(response, String(row.user_id), request, "login_succeeded");
+    return transaction(this.db, () => {
+      const latest = this.db.prepare("SELECT password_hash FROM auth_credentials WHERE user_id=?").get(String(row.user_id));
+      if (latest?.password_hash !== row.password_hash) throw new HttpError(401, "Credentials changed. Sign in again.", "invalid_credentials");
+      const activation = this.db.prepare("SELECT * FROM managed_accounts WHERE user_id=?").get(String(row.user_id));
+      if (activation && !activation.activated_at) {
+        if (!activation.activation_expires_at || Date.parse(String(activation.activation_expires_at)) <= Date.now()) throw new HttpError(401, "Activation expired. Ask your operator to reissue access.", "activation_expired");
+        if (activation.activation_claimed_at) throw new HttpError(401, "Activation was already used. Finish the password change in your signed-in session, or request reissue.", "activation_used");
+        this.db.prepare("UPDATE managed_accounts SET activation_claimed_at=? WHERE user_id=?").run(new Date().toISOString(),String(row.user_id));
+      }
+      return this.issueSession(response, String(row.user_id), request, "login_succeeded");
+    });
   }
 
   logout(request: Request, response: Response): void {
@@ -148,12 +162,17 @@ export class AuthService {
     if (currentPassword === newPassword) throw new HttpError(400, "Choose a password different from the current password");
     const password = createPasswordRecord(newPassword);
     const now = new Date().toISOString();
+    return transaction(this.db, () => {
+    this.session(request, { allowPasswordChange: true });
+    if (this.db.prepare("SELECT password_hash FROM auth_credentials WHERE user_id=?").get(current.currentUser.id)?.password_hash !== credential.password_hash) throw new HttpError(409, "Credentials changed. Sign in again.");
     this.db.prepare(`
       UPDATE auth_credentials SET password_hash = ?, password_salt = ?, password_params_json = ?,
         must_change_password = 0, password_changed_at = ? WHERE user_id = ?
     `).run(password.passwordHash, password.passwordSalt, password.passwordParams, now, current.currentUser.id);
+    this.db.prepare("UPDATE managed_accounts SET activated_at=?,activation_expires_at=NULL WHERE user_id=?").run(now,current.currentUser.id);
     this.audit(current.currentUser.id, current.currentUser.id, "password_changed", {}, request.ip ?? "");
     return { ...current, mustChangePassword: false };
+    });
   }
 
   initialize(request: Request, response: Response, body: Record<string, unknown>): AuthSessionResult {
@@ -168,20 +187,23 @@ export class AuthService {
     const password = createPasswordRecord(passwordValue(body.password));
     const duplicate = this.db.prepare("SELECT 1 FROM auth_credentials WHERE login_identifier_normalized = ?").get(normalized);
     if (duplicate) throw new HttpError(409, "That username is already in use");
-    const faculty = this.db.prepare("SELECT id FROM users WHERE id = ? AND role = 'faculty'").get(FACULTY_ID)
-      ?? this.db.prepare("SELECT id FROM users WHERE role = 'faculty' ORDER BY rowid LIMIT 1").get() as Row | undefined;
-    if (!faculty) throw new HttpError(409, "No faculty identity is available to claim");
-    const facultyId = String((faculty as Row).id);
+    const fresh = !this.db.prepare("SELECT 1 FROM users LIMIT 1").get();
+    const faculty = typeof body.facultyId === "string" ? this.db.prepare("SELECT id FROM users WHERE id=? AND role='faculty'").get(body.facultyId) : undefined;
+    if (!fresh && !faculty) throw new HttpError(409, "Select the exact existing faculty identity on this host. Existing identities are never chosen automatically.", "faculty_selection_required");
+    const facultyId = fresh ? randomUUID() : String(faculty!.id);
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("UPDATE users SET display_name = ? WHERE id = ?").run(displayName, facultyId);
+      if (!this.isSetupRequired()) throw new HttpError(409, "ATOM setup is already complete", "setup_complete");
+      if (fresh) this.db.prepare("INSERT INTO users(id,display_name,role) VALUES (?,?,'faculty')").run(facultyId,displayName);
+      else this.db.prepare("UPDATE users SET display_name=? WHERE id=?").run(displayName,facultyId);
       this.db.prepare(`
         INSERT INTO auth_credentials (
           user_id, login_identifier, login_identifier_normalized, password_hash, password_salt,
           password_params_json, must_change_password, password_changed_at, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
       `).run(facultyId, username.trim(), normalized, password.passwordHash, password.passwordSalt, password.passwordParams, now, now);
+      if (fresh) this.db.prepare("INSERT INTO installation_owners VALUES (?,?)").run(facultyId,now);
       this.audit(facultyId, facultyId, "setup_completed", {}, request.ip ?? "");
       this.db.exec("COMMIT");
     } catch (error) {
@@ -200,19 +222,34 @@ export class AuthService {
     this.requireLoopback(request);
     const faculty = this.db.prepare("SELECT * FROM users WHERE id = ? AND role = 'faculty'").get(facultyId) as Row | undefined;
     if (!faculty) throw new HttpError(404, "Faculty account not found");
-    const temporaryPassword = `Atom-${randomBytes(9).toString("base64url")}`;
-    this.replaceCredential(facultyId, this.facultyLoginIdentifier(facultyId), temporaryPassword, true);
-    this.revokeUserSessions(facultyId);
-    this.audit(facultyId, null, "faculty_recovered_locally", {}, request.ip ?? "");
-    return { temporaryPassword };
+    return transaction(this.db, () => {
+      if (!this.db.prepare("SELECT 1 FROM auth_credentials WHERE user_id=?").get(facultyId)) this.replaceCredential(facultyId, this.facultyLoginIdentifier(facultyId), randomBytes(24).toString("base64url"), true);
+      const handoff = issueActivation(this.db, facultyId);
+      this.audit(facultyId, null, "faculty_recovered_locally", {}, request.ip ?? "");
+      return handoff;
+    });
   }
 
-  resetStudent(request: Request, actor: AuthUser, studentId: string): void {
+  resetStudent(request: Request, actor: AuthUser, studentId: string) {
     const student = this.db.prepare("SELECT * FROM users WHERE id = ? AND role = 'student'").get(studentId) as Row | undefined;
     if (!student?.student_number) throw new HttpError(404, "Student account not found");
-    this.replaceCredential(studentId, String(student.student_number), String(student.student_number), true);
-    this.revokeUserSessions(studentId);
-    this.audit(studentId, actor.id, "student_password_reset", {}, request.ip ?? "");
+    return transaction(this.db, () => {
+      this.session(request);
+      const handoff = issueActivation(this.db, studentId);
+      this.audit(studentId, actor.id, "student_password_reset", {}, request.ip ?? "");
+      return handoff;
+    });
+  }
+
+  bootstrapOwner(request: Request, confirmUserId: unknown): void {
+    this.requireLoopback(request);
+    transaction(this.db, () => {
+      const user = this.session(request).currentUser;
+      if (user.role !== "faculty" || confirmUserId !== user.id) throw new HttpError(403, "Confirm the exact signed-in faculty identity for the operator grant");
+      if (this.db.prepare("SELECT 1 FROM installation_owners LIMIT 1").get()) throw new HttpError(409, "An installation owner is already established");
+      this.db.prepare("INSERT INTO installation_owners VALUES (?,?)").run(user.id,new Date().toISOString());
+      this.audit(user.id,user.id,"installation_owner_granted_locally",{},request.ip ?? "");
+    });
   }
 
   assumeIdentity(request: Request, response: Response, userId: string): AuthSessionResult {

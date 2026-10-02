@@ -1016,3 +1016,47 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .module-empty { min-height: 430px; }
   .modal { width: calc(100% - 24px); max-height: calc(100vh - 24px); }
 }
+/* Fixed-roster course setup: the existing ATOM theme and controls. */
+.course-setup { max-width:1280px; margin:0 auto; padding:32px clamp(16px,4vw,48px) 64px; line-height:1.55; }
+.setup-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:24px; margin-bottom:24px; }
+.setup-heading h1 { margin:12px 0 0; font-size:30px; }
+.setup-heading p { margin:6px 0; color:var(--muted); }
+.setup-save-state { padding:8px 12px; background:var(--surface-muted); border:1px solid var(--line); max-width:280px; }
+.setup-stages { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border-bottom:1px solid var(--line-strong); margin-bottom:24px; }
+.setup-stages button { display:flex; gap:9px; align-items:center; padding:14px 10px; min-height:48px; border:0; border-bottom:3px solid transparent; background:white; color:var(--navy); font:inherit; text-align:left; cursor:pointer; }
+.setup-stages button[aria-current] { border-bottom-color:var(--amber); font-weight:700; background:var(--amber-50); }
+.setup-stages button:disabled { color:var(--muted); cursor:default; }
+.setup-stages button span { border:1px solid currentColor; border-radius:50%; min-width:25px; text-align:center; }
+.setup-stage-heading:focus { outline:none; }
+.setup-fields { padding:20px; border:1px solid var(--line); margin:16px 0; min-width:0; }
+.setup-fields > legend { font-weight:700; }
+.course-setup fieldset fieldset { border:1px solid var(--line); margin:16px 0; padding:12px; min-width:0; }
+.course-setup label:not(.setup-check), .credential-handoff label:not(.setup-check) { display:grid; gap:6px; margin:12px 0; font-weight:600; min-width:0; }
+.course-setup input:not([type=checkbox]), .course-setup select, .course-setup textarea, .credential-handoff input:not([type=checkbox]) { width:100%; min-width:0; min-height:44px; padding:10px; border:1px solid var(--line-strong); border-radius:4px; background:white; color:var(--navy); font:inherit; }
+.course-setup textarea { resize:vertical; }
+.setup-check { display:inline-flex; align-items:center; gap:8px; padding:8px 12px 8px 0; min-height:44px; font-weight:400; }
+.setup-check input { width:18px; height:18px; flex-shrink:0; accent-color:var(--navy); }
+.setup-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.setup-two-column { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(260px,1fr); align-items:start; gap:28px; }
+.teaching-map { padding:20px; background:var(--surface-muted); border:1px solid var(--line); margin-top:16px; overflow-wrap:anywhere; }
+.teaching-map h2 { font-size:18px; margin:0; }
+.teaching-map ul { list-style:none; padding-left:18px; }
+.teaching-map li { border-left:2px solid var(--line-strong); padding:10px 0 10px 14px; }
+.teaching-map small, .setup-resume small, .roster-workbench td small { display:block; color:var(--muted); }
+.setup-help { color:var(--gray-600); font-size:14px; }
+.setup-lock { background:var(--amber-50); border-left:4px solid var(--amber); padding:14px 18px; }
+.setup-link-row { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
+.setup-link-row label { flex:1; min-width:130px; }
+.setup-actions { display:flex; gap:12px; justify-content:flex-end; flex-wrap:wrap; margin-top:24px; }
+.course-setup .button { min-height:44px; white-space:normal; }
+.course-setup details { border-top:1px solid var(--line); padding:14px 0; margin:10px 0; }
+.course-setup summary { cursor:pointer; min-height:36px; font-weight:600; }
+.setup-entry { margin-top:20px; width:fit-content; }
+.roster-workbench .data-table { min-width:680px; }
+.roster-workbench .data-table td { white-space:normal; max-width:300px; vertical-align:top; }
+.roster-workbench .data-table td .button { margin:4px; }
+.roster-workbench .activity-table-wrap { max-width:100%; overflow:auto; }
+.credential-handoff { padding:24px; max-height:calc(100dvh - 32px); overflow:auto; }
+.course-setup :focus-visible { outline:3px solid var(--amber); outline-offset:3px; }
+@media(max-width:800px) { .setup-two-column { grid-template-columns:1fr; } .setup-heading { flex-direction:column; gap:10px; } }
+@media(max-width:520px) { .course-setup { padding:20px 16px 40px; } .setup-stages { grid-template-columns:1fr 1fr; } .setup-form-grid { grid-template-columns:1fr; gap:0; } .setup-fields { padding:12px; } .setup-actions { justify-content:stretch; } .setup-actions .button { flex:1; } }

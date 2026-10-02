@@ -79,6 +79,7 @@ export function seedDemoAccounts(db: DatabaseSync): DemoAccount[] {
       if (!user || user.role !== account.role) {
         throw new Error(`Required ${account.role} demo identity is missing: ${account.userId}`);
       }
+      if (db.prepare("SELECT 1 FROM managed_accounts WHERE user_id=?").get(account.userId)) throw new Error("Managed accounts require secure activation reissue; demo credential resets are unavailable for them.");
       updateUser.run(account.displayName, account.studentNumber, account.userId);
       upsertCredential.run(
         account.userId,

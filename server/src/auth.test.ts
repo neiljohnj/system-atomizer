@@ -13,7 +13,7 @@ describe("local account lifecycle", () => {
   it("claims the existing faculty identity once and creates a revocable session", async () => {
     const root = mkdtempSync(join(tmpdir(), "atom-auth-test-"));
     roots.push(root);
-    const database = openAtomDatabase(root);
+    const database = openAtomDatabase(root, { sample: true });
     try {
       const auth = new AuthService(database.db, { developmentPreviewEnabled: false, secureCookies: false });
       const headers = new Map<string, string>();
@@ -21,7 +21,7 @@ describe("local account lifecycle", () => {
       const setupRequest = request({ remoteAddress: "127.0.0.1" });
       expect(auth.setupStatus().setupRequired).toBe(true);
       const session = auth.initialize(setupRequest, response, {
-        displayName: "Neil Faculty",
+        facultyId: "user-faculty-demo", displayName: "Neil Faculty",
         username: "neil.faculty",
         password: "faculty-password",
       });
@@ -52,13 +52,13 @@ describe("local account lifecycle", () => {
   it("forces a student using the default student-number password to change it", async () => {
     const root = mkdtempSync(join(tmpdir(), "atom-auth-test-"));
     roots.push(root);
-    const database = openAtomDatabase(root);
+    const database = openAtomDatabase(root, { sample: true });
     try {
       const auth = new AuthService(database.db, { developmentPreviewEnabled: false, secureCookies: false });
       const headers = new Map<string, string>();
       const response = { setHeader: (name: string, value: string) => headers.set(name.toLowerCase(), value) } as unknown as Response;
       auth.initialize(request({ remoteAddress: "127.0.0.1" }), response, {
-        displayName: "Faculty",
+        facultyId: "user-faculty-demo", displayName: "Faculty",
         username: "faculty",
         password: "faculty-password",
       });

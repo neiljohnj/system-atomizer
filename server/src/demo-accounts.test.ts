@@ -2,9 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { openAtomDatabase } from "./db.js";
+import { openAtomDatabase, STUDENT_ID } from "./db.js";
 import { DEMO_ACCOUNTS, seedDemoAccounts } from "./demo-accounts.js";
 import { verifyPassword } from "./security.js";
+import { issueActivation, transaction } from "./account-activation.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -12,10 +13,25 @@ afterEach(() => {
 });
 
 describe("explicit demo accounts", () => {
+  it("refuses predictable demo resets for a managed identity and rolls back earlier rows", () => {
+    const root = mkdtempSync(join(tmpdir(), "atom-demo-managed-"));
+    roots.push(root);
+    const { db } = openAtomDatabase(root, { sample: true });
+    try {
+      seedDemoAccounts(db);
+      transaction(db, () => issueActivation(db, STUDENT_ID));
+      const snapshot = () => JSON.stringify(["users", "auth_credentials", "managed_accounts", "auth_sessions", "auth_audit_events"].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()));
+      const before = snapshot();
+      expect(() => seedDemoAccounts(db)).toThrow(/secure activation reissue/);
+      expect(snapshot()).toBe(before);
+    } finally {
+      db.close();
+    }
+  });
   it("creates three usable credentials without forcing a password change", async () => {
     const root = mkdtempSync(join(tmpdir(), "atom-demo-accounts-"));
     roots.push(root);
-    const database = openAtomDatabase(root);
+    const database = openAtomDatabase(root, { sample: true });
     try {
       expect(seedDemoAccounts(database.db)).toHaveLength(3);
       for (const account of DEMO_ACCOUNTS) {

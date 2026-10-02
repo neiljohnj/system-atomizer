@@ -61,7 +61,7 @@ async function publishActivity(id: string, actor: keyof typeof actors = "both") 
 beforeAll(async () => {
   root = mkdtempSync(join(tmpdir(), "atom-authority-test-"));
   if (!isAbsolute(root) || !resolve(root).startsWith(resolve(tmpdir()) + sep) || resolve(root, "data") === resolve(repo, "data")) throw new Error("Unsafe test data root");
-  const database = openAtomDatabase(root); db = database.db;
+  const database = openAtomDatabase(root, { sample: true }); db = database.db;
   expect(resolve(database.dataDir)).toBe(resolve(root, "data"));
   db.prepare("DELETE FROM faculty_group_assignments").run();
   for (const [name, id] of Object.entries(actors)) {

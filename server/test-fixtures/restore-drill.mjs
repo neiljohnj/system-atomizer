@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { runPhase1Restore } from "./phase1-restore.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const parent = mkdtempSync(join(tmpdir(), "atom-restore-drill-"));
@@ -22,7 +23,7 @@ function manifest(root, folder = root) {
 async function start(root) {
   const listener = createServer(); listener.listen(0, "127.0.0.1"); await once(listener, "listening");
   const port = listener.address().port; await new Promise(done => listener.close(done));
-  const child = fork(join(repo, "server/test-fixtures/authority-server.mjs"), ["--compiled"], { cwd: repo, execArgv: [], windowsHide: true,
+  const child = fork(join(repo, "server/test-fixtures/authority-server.mjs"), ["--compiled", "--sample-data"], { cwd: repo, execArgv: [], windowsHide: true,
     env: { ...process.env, ATOM_ROOT: root, PORT: String(port), ATOM_HOST: "127.0.0.1", ATOM_BEHIND_PROXY: "false", ATOM_DEVELOPMENT_PREVIEW: "false", ATOM_HTTPS: "false", ATOM_ALLOWED_ORIGINS: "" }, stdio: ["ignore", "ignore", "inherit", "ipc"] });
   const base = `http://127.0.0.1:${port}`;
   for (let n = 0; ; n++) {
@@ -94,3 +95,4 @@ try {
   await stop(server);
   if (resolve(parent).startsWith(resolve(tmpdir()) + sep) && parent.includes("atom-restore-drill-")) rmSync(parent, { recursive: true, force: true });
 }
+await runPhase1Restore();

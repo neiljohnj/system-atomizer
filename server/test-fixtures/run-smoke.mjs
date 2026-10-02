@@ -12,7 +12,7 @@ if (!resolve(root, "data").startsWith(resolve(tmpdir()) + sep) || resolve(root, 
 const listener = createServer(); listener.listen(0, "127.0.0.1"); await once(listener, "listening");
 const port = listener.address().port; await new Promise(done => listener.close(done));
 const base = `http://127.0.0.1:${port}`;
-const server = fork(join(repo, "server/test-fixtures/authority-server.mjs"), [], { cwd: repo, execArgv: ["--import", "tsx"], windowsHide: true,
+const server = fork(join(repo, "server/test-fixtures/authority-server.mjs"), ["--sample-data"], { cwd: repo, execArgv: ["--import", "tsx"], windowsHide: true,
   env: { ...process.env, ATOM_ROOT: root, PORT: String(port), ATOM_DEVELOPMENT_PREVIEW: "false", ATOM_HTTPS: "false", ATOM_ALLOWED_ORIGINS: "" }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
 try {
   for (let n = 0; ; n++) {

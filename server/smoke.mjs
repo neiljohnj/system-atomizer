@@ -31,7 +31,7 @@ assert.equal(setup.setupRequired, true, "Smoke expects a disposable fresh ATOM_R
 await json("/api/setup", {
   method: "POST",
   headers: { "content-type": "application/json" },
-  body: JSON.stringify({ displayName: "Faculty Demo", username: "faculty-demo", password: "faculty-password" }),
+  body: JSON.stringify({ facultyId: "user-faculty-demo", displayName: "Faculty Demo", username: "faculty-demo", password: "faculty-password" }),
 }, facultyJar);
 
 const faculty = await json("/api/bootstrap", {}, facultyJar);

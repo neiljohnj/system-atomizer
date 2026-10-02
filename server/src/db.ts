@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { legacyActivityDocument } from "./activity-content.js";
 import { defaultActivityBlueprint } from "./activity-blueprint.js";
 import { createPasswordRecord, normalizeLoginIdentifier } from "./security.js";
+import { migrateAcademicSetup } from "./academic-migration.js";
 
 export const FACULTY_ID = "user-faculty-demo";
 export const STUDENT_ID = "user-student-demo";
@@ -21,7 +22,7 @@ export interface AtomDatabase {
   dataDir: string;
 }
 
-export function openAtomDatabase(rootDir: string): AtomDatabase {
+export function openAtomDatabase(rootDir: string, options: { sample?: boolean } = {}): AtomDatabase {
   const dataDir = join(rootDir, "data");
   mkdirSync(dataDir, { recursive: true });
 
@@ -29,12 +30,12 @@ export function openAtomDatabase(rootDir: string): AtomDatabase {
   db.exec("PRAGMA foreign_keys = ON");
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = FULL");
-  migrateAtomDatabase(db);
+  migrateAtomDatabase(db, options);
 
   return { db, dataDir };
 }
 
-export function migrateAtomDatabase(db: DatabaseSync): void {
+export function migrateAtomDatabase(db: DatabaseSync, options: { sample?: boolean } = {}): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -57,7 +58,8 @@ export function migrateAtomDatabase(db: DatabaseSync): void {
     }
   }
 
-  seedLegacySample(db);
+  // Synthetic data is an explicit fresh-fixture choice, never normal initialization.
+  if (options.sample && !hasMigration(db, 2)) seedLegacySample(db);
 
   if (!hasMigration(db, 2)) {
     applySubjectFoundation(db);
@@ -78,6 +80,7 @@ export function migrateAtomDatabase(db: DatabaseSync): void {
   if (!hasMigration(db, 6)) {
     applyStructuredActivityAuthoring(db);
   }
+  migrateAcademicSetup(db);
 }
 
 function hasMigration(db: DatabaseSync, version: number): boolean {
@@ -312,6 +315,7 @@ function applySubjectFoundation(db: DatabaseSync): void {
       );
     `);
 
+    if (db.prepare("SELECT 1 FROM subjects WHERE id=?").get(LEGACY_SUBJECT_ID)) {
     db.prepare("INSERT INTO academic_terms (id, label) VALUES (?, ?)").run(
       ACADEMIC_TERM_ID,
       "AY 2026–2027 · First Semester",
@@ -356,6 +360,7 @@ function applySubjectFoundation(db: DatabaseSync): void {
     placeStudent.run(firstEnrollmentId, LAB_2A_ID);
     placeStudent.run(secondEnrollmentId, LECTURE_2A_ID);
     placeStudent.run(secondEnrollmentId, LAB_2AX_ID);
+    }
 
     db.exec("ALTER TABLE activities ADD COLUMN subject_offering_id TEXT REFERENCES subject_offerings(id)");
     db.exec("ALTER TABLE activities ADD COLUMN grading_period TEXT CHECK (grading_period IN ('midterm', 'final_term'))");
@@ -364,7 +369,7 @@ function applySubjectFoundation(db: DatabaseSync): void {
       WHERE subject_id = ?
     `).run(SUBJECT_OFFERING_ID, LEGACY_SUBJECT_ID);
 
-    const targetRows = db.prepare("SELECT id FROM activities").all() as Array<{ id: string }>;
+    const targetRows = db.prepare("SELECT id FROM activities WHERE subject_offering_id=?").all(SUBJECT_OFFERING_ID) as Array<{ id: string }>;
     const insertTarget = db.prepare(`
       INSERT INTO activity_targets (activity_id, teaching_group_id) VALUES (?, ?)
     `);

@@ -65,12 +65,15 @@ export function LoginPage({ httpWarning, demoAccountsEnabled = false, onAuthenti
 }
 
 export function SetupPage({ httpWarning, onAuthenticated }: AuthPageProps) {
+  const [legacyFaculty,setLegacyFaculty]=useState<User[]>([]);
+  const [facultyId,setFacultyId]=useState("");
   const [displayName, setDisplayName] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(()=>{let active=true;void atomApi.recoverableFaculty().then(rows=>{if(active)setLegacyFaculty(rows);}).catch(()=>{});return()=>{active=false;};},[]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -81,7 +84,7 @@ export function SetupPage({ httpWarning, onAuthenticated }: AuthPageProps) {
     try {
       setBusy(true);
       setError(null);
-      onAuthenticated(await atomApi.initialize(displayName, username, password));
+      onAuthenticated(await atomApi.initialize(displayName, username, password, facultyId || undefined));
     } catch (setupError) {
       setError(setupError instanceof Error ? setupError.message : "Setup could not be completed");
     } finally {
@@ -91,10 +94,11 @@ export function SetupPage({ httpWarning, onAuthenticated }: AuthPageProps) {
 
   return (
     <AuthShell httpWarning={httpWarning}>
-      <div className="auth-heading"><p>First-time setup</p><h1>Create the faculty account</h1><span>This one-time page claims the existing Faculty Demo identity so authored materials retain their owner.</span></div>
+      <div className="auth-heading"><p>Host-local initialization</p><h1>{legacyFaculty.length?"Establish existing faculty access":"Create the installation owner"}</h1><span>{legacyFaculty.length?"Choose the exact existing identity. Authored records retain their IDs. An operator grant at /local-owner is a separate deliberate step after sign-in.":"A fresh installation starts empty. Create your own account, then use Set up course to configure teaching."}</span></div>
       <form className="auth-form" onSubmit={(event) => void submit(event)}>
+        {legacyFaculty.length?<label><span>Existing faculty identity</span><select required value={facultyId} onChange={e=>setFacultyId(e.target.value)}><option value="">Choose the identity to claim</option>{legacyFaculty.map(f=><option key={f.id} value={f.id}>{f.displayName} · {f.id}</option>)}</select></label>:null}
         <label><span>Faculty name</span><input autoFocus required value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
-        <label><span>Local username</span><input autoComplete="username" pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,63}" required value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+        <label><span>Local username</span><input autoComplete="username" pattern={"[A-Za-z0-9][A-Za-z0-9._\\-]{2,63}"} required value={username} onChange={(event) => setUsername(event.target.value)} /></label>
         <label><span>Password</span><input type="password" minLength={10} maxLength={128} autoComplete="new-password" required value={password} onChange={(event) => setPassword(event.target.value)} /><small>10–128 characters</small></label>
         <label><span>Confirm password</span><input type="password" minLength={10} maxLength={128} autoComplete="new-password" required value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label>
         {error ? <p className="form-error" role="alert">{error}</p> : null}

@@ -11,7 +11,7 @@ import { FACULTY_ID, LAB_2AX_ID, LAB_2A_ID, LEGACY_SUBJECT_ID, SUBJECT_OFFERING_
 const refresh = process.argv.includes("--refresh");
 if (!process.argv.includes("--development-fixture")) throw new Error("Stress seeding requires --development-fixture and an explicit disposable ATOM_ROOT.");
 if (!process.env.ATOM_ROOT?.trim()) throw new Error("Set ATOM_ROOT to the development fixture root before seeding.");
-const { db, dataDir } = openAtomDatabase(storageRoot());
+const { db, dataDir } = openAtomDatabase(storageRoot(), { sample: true });
 const fixtureDir = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "../fixtures/authoring/" : "../server/fixtures/authoring/", import.meta.url));
 const now = new Date().toISOString();
 const topicId = "topic-authoring-stress-tests";

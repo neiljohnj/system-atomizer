@@ -26,11 +26,11 @@ function temporaryRoot(): string {
 describe("ATOM database migrations", () => {
   it("creates the subject foundation on a fresh database and is idempotent", () => {
     const root = temporaryRoot();
-    const first = openAtomDatabase(root);
+    const first = openAtomDatabase(root, { sample: true });
     const activityBefore = first.db.prepare(`
       SELECT id, current_release_id FROM activities WHERE title = 'Laboratory Activity 01'
     `).get() as { id: string; current_release_id: string };
-    expect(first.db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 6 });
+    expect(first.db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 7 });
     expect(first.db.prepare("SELECT grading_period FROM activities WHERE id = ?").get(activityBefore.id)).toEqual({ grading_period: "midterm" });
     expect(first.db.prepare("SELECT COUNT(*) AS count FROM activity_targets WHERE activity_id = ?").get(activityBefore.id)).toEqual({ count: 2 });
     expect(first.db.prepare("SELECT COUNT(*) AS count FROM activity_release_scopes WHERE release_id = ?").get(activityBefore.current_release_id)).toEqual({ count: 2 });
@@ -41,12 +41,12 @@ describe("ATOM database migrations", () => {
     expect(first.db.prepare("SELECT json_extract(blueprint_json, '$.version') AS version FROM activities WHERE id = ?").get(activityBefore.id)).toEqual({ version: 1 });
     first.db.close();
 
-    const second = openAtomDatabase(root);
+    const second = openAtomDatabase(root, { sample: true });
     const activityAfter = second.db.prepare(`
       SELECT id, current_release_id FROM activities WHERE title = 'Laboratory Activity 01'
     `).get() as { id: string; current_release_id: string };
     expect(activityAfter).toEqual(activityBefore);
-    expect(second.db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 6 });
+    expect(second.db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 7 });
     second.db.close();
   });
 
@@ -64,7 +64,7 @@ describe("ATOM database migrations", () => {
     expect(legacy.prepare("SELECT release_id FROM submissions WHERE id = 'submission-existing'").get()).toEqual({ release_id: "release-existing" });
     expect(legacy.prepare("SELECT COUNT(*) AS count FROM activity_targets WHERE activity_id = 'activity-existing' AND teaching_group_id IN (?, ?)").get(LAB_2A_ID, LAB_2AX_ID)).toEqual({ count: 2 });
     expect(legacy.prepare("SELECT is_current_submission FROM submissions WHERE id = 'submission-existing'").get()).toEqual({ is_current_submission: 1 });
-    expect(legacy.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 6 });
+    expect(legacy.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 7 });
     expect(legacy.prepare("SELECT draft_revision, accepted_extensions_json FROM activities WHERE id = 'activity-existing'").get()).toEqual({ draft_revision: 1, accepted_extensions_json: '[\".py\",\".zip\"]' });
     expect(legacy.prepare("SELECT json_extract(content_json, '$.sections[0].title') AS title FROM activities WHERE id = 'activity-existing'").get()).toEqual({ title: "Activity overview" });
     expect(legacy.prepare("SELECT topic_id, manual_position FROM activities WHERE id = 'activity-existing'").get()).toEqual({ topic_id: null, manual_position: null });
@@ -78,7 +78,7 @@ describe("ATOM database migrations", () => {
 
   it("repairs upgraded authentication sessions that predate preview identities", () => {
     const root = temporaryRoot();
-    const database = openAtomDatabase(root);
+    const database = openAtomDatabase(root, { sample: true });
     try {
       database.db.prepare("DELETE FROM schema_migrations WHERE version = 4").run();
       database.db.exec("ALTER TABLE auth_sessions DROP COLUMN development_preview");

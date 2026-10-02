@@ -2,13 +2,14 @@ import { ArrowRight, BookOpen, FlaskConical } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { AcademicTerm, Role } from "../../types";
 
-export function SubjectHome({ academicTerms, role }: { academicTerms: AcademicTerm[]; role: Role }) {
+export function SubjectHome({ academicTerms, role, canSetup = false }: { academicTerms: AcademicTerm[]; role: Role; canSetup?: boolean }) {
   return (
     <main className="subject-home">
       <header className="subject-home__intro">
         <p>{role === "faculty" ? "Faculty workspace" : "Student workspace"}</p>
         <h1>Your subjects</h1>
         <span>Select a subject to open its activities, quizzes, and exams.</span>
+        {canSetup ? <Link className="button button--primary setup-entry" to="/course-setup">Set up course</Link> : null}
       </header>
       {academicTerms.length ? academicTerms.map((term) => (
         <section className="term-section" key={term.id}>
@@ -20,6 +21,7 @@ export function SubjectHome({ academicTerms, role }: { academicTerms: AcademicTe
                 <div className="subject-card__body">
                   <strong>{offering.code}</strong>
                   <h3>{offering.title}</h3>
+                  {offering.setupOnly ? <small>Setup management · {offering.setupState}</small> : null}
                   <div className="group-chip-row">
                     {offering.groups.map((group) => (
                       <span className="group-chip" key={group.id}>

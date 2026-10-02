@@ -12,7 +12,7 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const root = mkdtempSync(join(tmpdir(), "atom-phase0-browser-"));
 const reserve = createServer(); reserve.listen(0, "0.0.0.0"); await once(reserve, "listening");
 const port = reserve.address().port; await new Promise(done => reserve.close(done));
-const child = fork(join(repo, "server/test-fixtures/authority-server.mjs"), ["--compiled"], { cwd: repo, execArgv: [], windowsHide: true,
+const child = fork(join(repo, "server/test-fixtures/authority-server.mjs"), ["--compiled", "--sample-data"], { cwd: repo, execArgv: [], windowsHide: true,
   env: { ...process.env, ATOM_ROOT: root, PORT: String(port), ATOM_HOST: "0.0.0.0", ATOM_BEHIND_PROXY: "false", ATOM_DEVELOPMENT_PREVIEW: "false", ATOM_HTTPS: "false", ATOM_ALLOWED_ORIGINS: "" }, stdio: ["ignore", "ignore", "inherit", "ipc"] });
 const base = `http://127.0.0.1:${port}`;
 for (let n = 0; ; n++) {

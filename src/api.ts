@@ -29,7 +29,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers(options.headers);
   let body = options.body as BodyInit | null | undefined;
   if (body && !(body instanceof FormData) && typeof body !== "string") {
@@ -85,10 +85,10 @@ export const atomApi = {
     return request<{ setupRequired: boolean; httpWarning: boolean }>("/api/setup");
   },
 
-  initialize(displayName: string, username: string, password: string) {
+  initialize(displayName: string, username: string, password: string, facultyId?: string) {
     return request<AuthSessionPayload>("/api/setup", {
       method: "POST",
-      body: { displayName, username, password },
+      body: { displayName, username, password, facultyId },
     });
   },
 
@@ -212,7 +212,7 @@ export const atomApi = {
   },
 
   resetStudentPassword(offeringId: string, studentId: string) {
-    return request<void>(`/api/subject-offerings/${offeringId}/students/${studentId}/reset-password`, { method: "POST" });
+    return request<import("./features/setup/setup-api").CredentialHandoff>(`/api/subject-offerings/${offeringId}/students/${studentId}/reset-password`, { method: "POST" });
   },
 
   uploadSubmission(activityId: string, file: File, idempotencyKey: string, completedThroughPartId?: string | null) {
